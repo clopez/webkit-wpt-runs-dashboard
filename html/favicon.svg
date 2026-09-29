@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>WebKit WPT runs (Linux)</title>
+  <!-- The dashboard in miniature: WPE WebKit on the left, WebKitGTK on the right, one row per run. -->
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#151a25" stroke="#4a5670" stroke-width="2"/>
+  <path d="M32 9 V55" stroke="#5a6680" stroke-width="2" stroke-dasharray="3 3"/>
+  <rect x="8" y="10" width="20" height="13" rx="3" fill="#2f6b4a"/>
+  <rect x="8" y="10" width="6" height="13" rx="2" fill="#6ddc98"/>
+  <rect x="8" y="26" width="20" height="13" rx="3" fill="#2f6b4a"/>
+  <rect x="8" y="26" width="6" height="13" rx="2" fill="#6ddc98"/>
+  <rect x="8" y="42" width="20" height="13" rx="3" fill="#7a6430"/>
+  <rect x="8" y="42" width="6" height="13" rx="2" fill="#ffcf5c"/>
+  <rect x="36" y="10" width="20" height="13" rx="3" fill="#2f6b4a"/>
+  <rect x="36" y="10" width="6" height="13" rx="2" fill="#6ddc98"/>
+  <rect x="36" y="26" width="20" height="13" rx="3" fill="#8a3a3a"/>
+  <rect x="36" y="26" width="6" height="13" rx="2" fill="#ff8f86"/>
+  <rect x="36" y="42" width="20" height="13" rx="3" fill="#2f6b4a"/>
+  <rect x="36" y="42" width="6" height="13" rx="2" fill="#6ddc98"/>
+</svg>

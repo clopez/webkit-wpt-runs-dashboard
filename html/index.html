@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebKit WPT runs (Linux)</title>
+<meta name="description" content="The WPT runs of WebKitGTK and WPE WebKit on Taskcluster, their results on wpt.fyi, and the nightly bundles they test.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="dashboard.css">
+<script>
+  // Applied before the first paint, so the page never flashes in the other theme.
+  try {
+    const theme = localStorage.getItem("dashboard-theme");
+    if (theme === "light" || theme === "dark") document.documentElement.setAttribute("data-theme", theme);
+  } catch (error) {}
+</script>
+<script src="dashboard.js" defer></script>
+</head>
+<body>
+<main class="page" id="page"></main>
+<noscript><p class="page">This page needs JavaScript to show the runs. The raw data is in <a href="data/dashboard.json">data/dashboard.json</a> and the log in <a href="data/cron_helper.log.txt">data/cron_helper.log.txt</a>.</p></noscript>
+</body>
+</html>

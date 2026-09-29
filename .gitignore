@@ -1,0 +1,4 @@
+html/data/
+cron_helper/cache/
+cron_helper/logs/
+__pycache__/
