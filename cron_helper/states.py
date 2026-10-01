@@ -94,7 +94,7 @@ def summarize_chunks(chunks, also_expected=None):
     expected_by_suite = dict(also_expected or {})
     present = set()
     summary = {"total": len(chunks), "expected": 0, "completed": 0, "unfinished": 0, "failed": [], "missing": [], "retried": 0,
-               "first_started": None, "last_resolved": None, "run_seconds": 0}
+               "first_started": None, "last_resolved": None, "run_seconds": 0, "timed_chunks": 0, "slowest": None}
     for chunk in chunks:
         present.add((chunk["suite"], chunk["chunk"]))
         if chunk["chunks_in_suite"]:
@@ -116,7 +116,11 @@ def summarize_chunks(chunks, also_expected=None):
         # Only the last run produced the results, so a run that a retry replaced is not part of the run's time.
         last_run = chunk["runs"][-1] if chunk["runs"] else {}
         if last_run.get("started") and last_run.get("resolved"):
-            summary["run_seconds"] += round((parse_time(last_run["resolved"]) - parse_time(last_run["started"])).total_seconds())
+            seconds = round((parse_time(last_run["resolved"]) - parse_time(last_run["started"])).total_seconds())
+            summary["run_seconds"] += seconds
+            summary["timed_chunks"] += 1
+            if summary["slowest"] is None or seconds > summary["slowest"]["seconds"]:
+                summary["slowest"] = {"name": chunk["name"], "task_id": chunk["task_id"], "seconds": seconds}
     for suite, count in sorted(expected_by_suite.items()):
         summary["missing"].extend(f"{suite}-{number}" for number in range(1, count + 1) if (suite, number) not in present)
     summary["expected"] = sum(expected_by_suite.values()) or len(chunks)

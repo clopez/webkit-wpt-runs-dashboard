@@ -121,6 +121,7 @@ h3.sub { font-size: 0.86rem; color: var(--muted); letter-spacing: 0.04em; text-t
 .dim { color: var(--muted); }
 .warning-text { color: var(--wait); font-weight: 500; }
 .gap-warning { color: var(--wait); font-weight: 500; cursor: help; border: none; background: none; font: inherit; padding: 0; text-decoration: underline dotted; }
+.run-times { display: grid; grid-template-columns: max-content 1fr; gap: 0 8px; font-family: var(--font-data); font-size: 0.74rem; }
 .stale-note { color: var(--wait); font-size: 0.74rem; }
 .diff-toggle { justify-self: start; margin-top: 3px; font-size: 0.76rem; padding: 1px 8px; }
 .cell.selected { outline: 2px solid var(--accent); outline-offset: 1px; }

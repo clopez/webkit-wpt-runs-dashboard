@@ -63,7 +63,7 @@ SETTINGS = states.Settings()
 # An answer that parses but lacks the fields the script reads is as unusable as
 # a failed request, so it gets the same fallback instead of stopping the run.
 REQUEST_ERRORS = (FetchError, KeyError, TypeError, ValueError)
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 # A run that stops because of an unexpected error is tried again right away,
 # first with the same cache, in case the error was random, and then with an
 # empty one, in case the cache itself is what makes it fail.
@@ -423,6 +423,8 @@ def with_links(chunks, product):
     chunks["failed"] = [{**failed, "task_url": sources.task_url(failed["task_id"]),
                          "log_url": sources.task_log_url(failed["task_id"], failed["run_id"]) if failed["run_id"] is not None else None}
                         for failed in chunks["failed"]]
+    if chunks.get("slowest"):
+        chunks["slowest"] = {**chunks["slowest"], "task_url": sources.task_url(chunks["slowest"]["task_id"])}
     return chunks
 
 

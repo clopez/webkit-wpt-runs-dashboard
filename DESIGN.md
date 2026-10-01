@@ -433,15 +433,26 @@ answering), up to `retriesLeft` times. A run that ends in `failed` is not
 retried, and a person can also rerun a task by hand. Every run of a task is
 kept in its list of runs.
 
-Once all the chunks of a cell have finished, the cell also shows how long the
-run took: "WPT time: 9 h 12 min across 33 chunks" is the sum of the time of each
+Every cell with chunks that ran, whatever its state, also shows how long the
+run took, in three lines:
+
+    Task duration:    2h 21m (wall time)
+    Total chunk time: 15h 29m (33 chunks)
+    Slowest chunk:    58m 3s (testharness-12)
+
+The task duration is the time from the first run of any chunk starting to the
+last one finishing, retries included, which is how long the run took for
+someone waiting on it. The total chunk time is the sum of the time of each
 chunk's last run, the one that produced its results, so it says what the run
-cost, and a run that a retry replaced is not counted. Its tooltip gives the
-time from the first run of any chunk starting to the last one finishing,
-retries included, which is how long the run took for someone waiting on it,
-and much shorter, because the chunks run in parallel. Both come from the
-`started` and `resolved` times of each run in the task group listing, so they
-cost no request.
+cost, and a run that a retry replaced is not counted. It is much longer than
+the task duration, because the chunks run in parallel. The slowest chunk links
+to its task on Taskcluster. While chunks are still running, the times count
+only the chunks that have finished ("12 of 33 chunks"), and the task duration
+runs until the data was generated ("so far"). All of it comes from the
+`started` and `resolved` times of each run in the task group listing, so it
+costs no request. Like every duration on the page, the build times included, a
+duration of an hour or more is shown in hours and minutes, and a shorter one
+in minutes and seconds.
 
 ## Diff against the previous run (green runs only)
 
@@ -715,7 +726,9 @@ cannot shift the cells of the other days.
             "state": "uploaded", "color": "green",
             "chunks": {"total": 33, "expected": 33, "completed": 33, "unfinished": 0, "retried": 0,
                        "failed": [], "missing": [], "first_started": "…", "last_resolved": "…",
-                       "run_seconds": 33120, "task_group_id": "…", "task_group_url": "…"},
+                       "run_seconds": 33120, "timed_chunks": 33,
+                       "slowest": {"name": "…", "task_id": "…", "seconds": 3483, "task_url": "…"},
+                       "task_group_id": "…", "task_group_url": "…"},
             "wptfyi": {
               "run_id": 5193370485129216, "time_start": "…", "created_at": "…",
               "browser_version": "2.55.0 (321964@main)", "identifier": "321964@main",

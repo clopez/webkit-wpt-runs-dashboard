@@ -89,9 +89,15 @@ function formatAge(milliseconds) {
   return plural(Math.floor(hours / 24), "day");
 }
 
+// Seconds only matter for durations under an hour.
 function formatSeconds(seconds) {
-  const minutes = Math.round(seconds / 60);
-  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+  const total = Math.max(0, Math.round(seconds));
+  if (total >= 3600) {
+    const minutes = Math.round(total / 60);
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  }
+  const minutes = Math.floor(total / 60), rest = total % 60;
+  return minutes ? `${minutes}m ${rest}s` : `${rest}s`;
 }
 
 function formatDuration(startIso, endIso) {
@@ -321,13 +327,19 @@ function shortChunkName(name) {
   return name.replace(/^wpt-[a-z0-9_]+-[a-z]+-/, "");
 }
 
-// The sum of the chunks' times, which is what the run cost; the time it took,
-// with the chunks running in parallel, is much shorter and goes in the tooltip.
-function runTimeLine(chunks) {
-  if (!chunks || chunks.unfinished || !chunks.run_seconds) return null;
-  const elapsed = chunks.first_started && chunks.last_resolved
-    ? `From the first chunk starting to the last one finishing: ${formatDuration(chunks.first_started, chunks.last_resolved)}` : null;
-  return element("div", { class: "note", title: elapsed }, `WPT time: ${formatSeconds(chunks.run_seconds)} across ${plural(chunks.total, "chunk")}`);
+// While chunks are still running, the times only count the ones that have
+// finished, and the wall time runs until this data was generated.
+function runTimes(chunks) {
+  if (!chunks?.timed_chunks || !chunks.first_started) return null;
+  const running = chunks.unfinished > 0;
+  const wallSeconds = (new Date(running ? dashboard.generated_at : chunks.last_resolved) - new Date(chunks.first_started)) / 1000;
+  const counted = chunks.timed_chunks < chunks.total ? `${chunks.timed_chunks} of ${plural(chunks.total, "chunk")}` : plural(chunks.total, "chunk");
+  const slowest = chunks.slowest;
+  return element("div", { class: "run-times" },
+    element("span", { class: "dim" }, "Task duration:"), element("span", {}, `${formatSeconds(wallSeconds)} (wall time${running ? " so far" : ""})`),
+    element("span", { class: "dim" }, "Total chunk time:"), element("span", {}, `${formatSeconds(chunks.run_seconds)} (${counted})`),
+    slowest ? element("span", { class: "dim" }, "Slowest chunk:") : null,
+    slowest ? element("span", {}, `${formatSeconds(slowest.seconds)} (`, link(slowest.task_url, shortChunkName(slowest.name), null, `${slowest.name} on Taskcluster`), ")") : null);
 }
 
 function taskGroupLink(chunks) {
@@ -426,8 +438,8 @@ function stateCell(portKey, cell, row, channelLabel) {
   const node = element("div", { class: `cell ${STATE_KIND[cell.color] || "none"}` }, top,
     details.map(detail => typeof detail === "string" ? element("div", { class: "detail" }, detail) : detail));
   if (chunks.retried) node.append(element("div", { class: "note" }, `${plural(chunks.retried, "chunk")} passed after a retry`));
-  const runTime = runTimeLine(cell.chunks);
-  if (runTime) node.append(runTime);
+  const times = runTimes(cell.chunks);
+  if (times) node.append(times);
   if (links.length) node.append(element("div", { class: "links" }, links));
   if (row.stale && cell.state !== "commit_unavailable") node.append(element("div", { class: "stale-note" }, "Could not refresh this commit; showing the last data"));
   return node;
@@ -476,8 +488,8 @@ function uploadedCell(portKey, channel, cell, row, channelLabel) {
       link(buildUrl(portByKey(portKey).builder, info.tested_build.number), `build #${info.tested_build.number}`), ` of ${shortDate(utcDate(info.tested_build.started_at))}`));
   }
   if (cell.chunks?.retried) node.append(element("div", { class: "note" }, `${plural(cell.chunks.retried, "chunk")} passed after a retry`));
-  const runTime = runTimeLine(cell.chunks);
-  if (runTime) node.append(runTime);
+  const times = runTimes(cell.chunks);
+  if (times) node.append(times);
   if (row.stale) node.append(element("div", { class: "stale-note" }, "Could not refresh this commit; showing the last data"));
   if (diff && diff.detail) {
     const button = element("button", { type: "button", class: "plain diff-toggle", "aria-expanded": String(isOpen) }, isOpen ? "Hide diff" : "Show diff");
