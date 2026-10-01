@@ -400,7 +400,10 @@ When a run is not uploaded, the cell tries to explain why:
   unknown" instead; keeping the limit that applied on each date would fix that;
 - if the saved `/api/status` entries have one for the run that wpt.fyi did not
   accept, it shows the stage and the error of the latest one. A `VALID` entry
-  is not shown as a reason, since it means the upload was accepted;
+  is not shown as a reason, since it means the upload was accepted. These
+  errors can be very long, because wpt.fyi lists every report file of the run
+  in them, so the cell shows the first 160 characters followed by "[...]",
+  and a "Show full error" button shows the rest;
 - otherwise it says the cause is unknown and that wpt.fyi's server logs are
   needed.
 

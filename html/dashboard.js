@@ -25,6 +25,7 @@ const view = {
   openNodes: new Set(),
   diffs: new Map(),
   openGapNotes: new Set(),
+  openErrors: new Set(),
   logHeight: null,
   logScrolledUp: false,
   logScrollTop: 0,
@@ -362,6 +363,18 @@ function reasonText(reason) {
   return "Cause unknown; wpt.fyi's server logs are needed";
 }
 
+const ERROR_PREVIEW_LENGTH = 160;
+
+// The errors of other services can be very long: wpt.fyi's lists every report file of the run.
+function errorText(key, text) {
+  if (!text || text.length <= ERROR_PREVIEW_LENGTH) return text;
+  const isOpen = view.openErrors.has(key);
+  const button = element("button", { type: "button", class: "plain diff-toggle", "aria-expanded": String(isOpen) }, isOpen ? "Hide full error" : "Show full error");
+  button.addEventListener("click", () => { if (isOpen) view.openErrors.delete(key); else view.openErrors.add(key); render(); });
+  return element("div", { class: "long-error" },
+    element("div", { class: "detail" }, isOpen ? text : `${text.slice(0, ERROR_PREVIEW_LENGTH)} [...]`), button);
+}
+
 function stateCell(portKey, cell, row, channelLabel) {
   const chunks = cell.chunks || {};
   const top = element("div", { class: "top" });
@@ -400,7 +413,7 @@ function stateCell(portKey, cell, row, channelLabel) {
     }
     case "not_uploaded":
       top.append(element("span", { class: "headline" }, "Not uploaded"));
-      details.push(reasonText(cell.reason));
+      details.push(errorText(`${portKey}:${row.tag}:${channelLabel || ""}`, reasonText(cell.reason)));
       details.push(`The suite finished at ${formatTime(cell.since)}`);
       break;
     case "suite_never_finished":
