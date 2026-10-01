@@ -445,7 +445,7 @@ Every cell with chunks that ran, whatever its state, also shows how long the
 run took, in three lines:
 
     Task duration:    2h 21m (wall time)
-    Total chunk time: 15h 29m (33 chunks)
+    Total chunk time: 15h 29m (33 chunks, avg 28m 9s)
     Slowest chunk:    58m 3s (testharness-12)
 
 The task duration is the time from the first run of any chunk starting to the
@@ -453,14 +453,15 @@ last one finishing, retries included, which is how long the run took for
 someone waiting on it. The total chunk time is the sum of the time of each
 chunk's last run, the one that produced its results, so it says what the run
 cost, and a run that a retry replaced is not counted. It is much longer than
-the task duration, because the chunks run in parallel. The slowest chunk links
-to its task on Taskcluster. While chunks are still running, the times count
-only the chunks that have finished ("12 of 33 chunks"), and the task duration
-runs until the data was generated ("so far"). All of it comes from the
-`started` and `resolved` times of each run in the task group listing, so it
-costs no request. Like every duration on the page, the build times included, a
-duration of an hour or more is shown in hours and minutes, and a shorter one
-in minutes and seconds.
+the task duration, because the chunks run in parallel. Next to it is the
+average per chunk, the total divided by the chunks it counts. The slowest
+chunk links to its task on Taskcluster. While chunks are still running, the
+times count only the chunks that have finished ("12 of 33 chunks"), and the
+task duration runs until the data was generated ("so far"). All of it comes
+from the `started` and `resolved` times of each run in the task group listing,
+so it costs no request. Like every duration on the page, the build times
+included, a duration of an hour or more is shown in hours and minutes, and a
+shorter one in minutes and seconds.
 
 ## Diff against the previous run (green runs only)
 

@@ -337,7 +337,7 @@ function runTimes(chunks) {
   const slowest = chunks.slowest;
   return element("div", { class: "run-times" },
     element("span", { class: "dim" }, "Task duration:"), element("span", {}, `${formatSeconds(wallSeconds)} (wall time${running ? " so far" : ""})`),
-    element("span", { class: "dim" }, "Total chunk time:"), element("span", {}, `${formatSeconds(chunks.run_seconds)} (${counted})`),
+    element("span", { class: "dim" }, "Total chunk time:"), element("span", {}, `${formatSeconds(chunks.run_seconds)} (${counted}, avg ${formatSeconds(chunks.run_seconds / chunks.timed_chunks)})`),
     slowest ? element("span", { class: "dim" }, "Slowest chunk:") : null,
     slowest ? element("span", {}, `${formatSeconds(slowest.seconds)} (`, link(slowest.task_url, shortChunkName(slowest.name), null, `${slowest.name} on Taskcluster`), ")") : null);
 }
