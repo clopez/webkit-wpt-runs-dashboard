@@ -188,14 +188,12 @@ Everything lives in one repository:
   first number.
 - It always shows when the data was generated. If the last update failed
   after its three attempts, the "Last update" badge turns red right away
-  ("Last update failed at 12:00: see the log"), with the error in its tooltip.
-  If the data is more than 7 hours old, which means about two missed runs of
-  the script, the badge turns red and says so ("Last update 10 hours ago: the
-  cron job may have stopped"), because the cron job has probably stopped
-  working. That
-  replaces what the badge says about the errors and warnings of the last run,
-  so the header never shows a green "no errors" next to data that is too
-  old.
+  ("Last update failed at 12:00"), with the error in its tooltip. If the data
+  is more than 7 hours old, which means about two missed runs of the script,
+  the badge turns red and says so ("Last update 10 hours ago (cron
+  stopped?)"), because the script has probably stopped running. That replaces
+  what the badge says about the errors and warnings of the last run, so the
+  header never shows a green "no errors" next to data that is too old.
 - It always shows the script's log, not only when there were errors, in a
   resizable block at the bottom of the page, scrolled to its end, with the
   `ERROR:` lines in red and the `WARNING:` lines in yellow, and a link to the
@@ -427,7 +425,23 @@ Every cell that is not green also links to two pages about its whole run:
   stable and beta.
 
 A task that failed and passed when retried counts as passed, and the cell shows
-a small note with the number of chunks that passed after a retry.
+a small note with the number of chunks that passed after a retry. Taskcluster
+retries a task by itself when a run ends in `exception` for a reason outside
+the task, such as `worker-shutdown` (the machine was shut down, common with the
+preemptible machines WPT uses) or `claim-expired` (the worker stopped
+answering), up to `retriesLeft` times. A run that ends in `failed` is not
+retried, and a person can also rerun a task by hand. Every run of a task is
+kept in its list of runs.
+
+Once all the chunks of a cell have finished, the cell also shows how long the
+run took: "WPT time: 9 h 12 min across 33 chunks" is the sum of the time of each
+chunk's last run, the one that produced its results, so it says what the run
+cost, and a run that a retry replaced is not counted. Its tooltip gives the
+time from the first run of any chunk starting to the last one finishing,
+retries included, which is how long the run took for someone waiting on it,
+and much shorter, because the chunks run in parallel. Both come from the
+`started` and `resolved` times of each run in the task group listing, so they
+cost no request.
 
 ## Diff against the previous run (green runs only)
 
@@ -700,8 +714,8 @@ cannot shift the cells of the other days.
           "nightly": {
             "state": "uploaded", "color": "green",
             "chunks": {"total": 33, "expected": 33, "completed": 33, "unfinished": 0, "retried": 0,
-                       "failed": [], "missing": [], "last_resolved": "…",
-                       "task_group_id": "…", "task_group_url": "…"},
+                       "failed": [], "missing": [], "first_started": "…", "last_resolved": "…",
+                       "run_seconds": 33120, "task_group_id": "…", "task_group_url": "…"},
             "wptfyi": {
               "run_id": 5193370485129216, "time_start": "…", "created_at": "…",
               "browser_version": "2.55.0 (321964@main)", "identifier": "321964@main",

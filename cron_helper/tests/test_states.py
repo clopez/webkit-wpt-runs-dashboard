@@ -82,6 +82,16 @@ class ChunksTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             states.parse_task(entry)
 
+    def test_the_run_time_counts_the_last_run_of_each_chunk_and_the_elapsed_time_starts_with_the_first(self):
+        retried = [{"runId": 0, "state": "exception", "reasonResolved": "worker-shutdown", "started": "2026-09-29T05:00:00Z", "resolved": "2026-09-29T05:20:00Z"},
+                   {"runId": 1, "state": "completed", "reasonResolved": "completed", "started": "2026-09-29T05:30:00Z", "resolved": "2026-09-29T06:30:00Z"}]
+        once = [{"runId": 0, "state": "completed", "reasonResolved": "completed", "started": "2026-09-29T05:10:00Z", "resolved": "2026-09-29T05:40:00Z"}]
+        chunks = [states.parse_task(task("wpt-wpewebkit_minibrowser-nightly-reftest-1", chunk_of=2, runs=retried)),
+                  states.parse_task(task("wpt-wpewebkit_minibrowser-nightly-reftest-2", chunk_of=2, runs=once))]
+        summary = states.summarize_chunks(chunks)
+        self.assertEqual(summary["run_seconds"], 60 * 60 + 30 * 60)
+        self.assertEqual((summary["first_started"], summary["last_resolved"]), ("2026-09-29T05:00:00Z", "2026-09-29T06:30:00Z"))
+
     def test_a_time_without_a_zone_is_taken_as_utc(self):
         self.assertEqual(states.parse_time("2026-09-27T06:00:00"), states.parse_time("2026-09-27T06:00:00Z"))
 

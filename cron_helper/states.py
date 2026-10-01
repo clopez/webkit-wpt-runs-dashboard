@@ -45,6 +45,7 @@ def parse_task(entry):
     status = entry["status"]
     for run in status.get("runs", []):
         # Checked now, so a bad time counts as a bad answer instead of failing later, far from where it came from.
+        parse_time(run.get("started"))
         parse_time(run.get("resolved"))
     return {
         "name": name,
@@ -57,7 +58,7 @@ def parse_task(entry):
         "task_group_id": status.get("taskGroupId"),
         "state": status["state"],
         "runs": [{"run_id": run["runId"], "state": run["state"], "reason": run.get("reasonResolved"),
-                  "resolved": run.get("resolved")} for run in status.get("runs", [])],
+                  "started": run.get("started"), "resolved": run.get("resolved")} for run in status.get("runs", [])],
     }
 
 
@@ -92,7 +93,8 @@ def summarize_chunks(chunks, also_expected=None):
     ones the other port ran."""
     expected_by_suite = dict(also_expected or {})
     present = set()
-    summary = {"total": len(chunks), "expected": 0, "completed": 0, "unfinished": 0, "failed": [], "missing": [], "retried": 0, "last_resolved": None}
+    summary = {"total": len(chunks), "expected": 0, "completed": 0, "unfinished": 0, "failed": [], "missing": [], "retried": 0,
+               "first_started": None, "last_resolved": None, "run_seconds": 0}
     for chunk in chunks:
         present.add((chunk["suite"], chunk["chunk"]))
         if chunk["chunks_in_suite"]:
@@ -109,6 +111,12 @@ def summarize_chunks(chunks, also_expected=None):
         for run in chunk["runs"]:
             if run["resolved"] and time_key(run["resolved"]) > time_key(summary["last_resolved"]):
                 summary["last_resolved"] = run["resolved"]
+            if run["started"] and (summary["first_started"] is None or time_key(run["started"]) < time_key(summary["first_started"])):
+                summary["first_started"] = run["started"]
+        # Only the last run produced the results, so a run that a retry replaced is not part of the run's time.
+        last_run = chunk["runs"][-1] if chunk["runs"] else {}
+        if last_run.get("started") and last_run.get("resolved"):
+            summary["run_seconds"] += round((parse_time(last_run["resolved"]) - parse_time(last_run["started"])).total_seconds())
     for suite, count in sorted(expected_by_suite.items()):
         summary["missing"].extend(f"{suite}-{number}" for number in range(1, count + 1) if (suite, number) not in present)
     summary["expected"] = sum(expected_by_suite.values()) or len(chunks)

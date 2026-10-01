@@ -89,9 +89,13 @@ function formatAge(milliseconds) {
   return plural(Math.floor(hours / 24), "day");
 }
 
-function formatDuration(startIso, endIso) {
-  const minutes = Math.round((new Date(endIso) - new Date(startIso)) / 60000);
+function formatSeconds(seconds) {
+  const minutes = Math.round(seconds / 60);
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+}
+
+function formatDuration(startIso, endIso) {
+  return formatSeconds((new Date(endIso) - new Date(startIso)) / 1000);
 }
 
 const shortDate = date => date.slice(5);
@@ -184,10 +188,10 @@ function header() {
 // failed or is so old that the cron job has probably stopped, which matter more.
 function lastUpdateBadge(age) {
   if (dashboard.failed_update)
-    return summaryBadge("#log", "bad", `Last update failed at ${formatTime(dashboard.failed_update.at, { withDate: false })}: see the log`,
+    return summaryBadge("#log", "bad", `Last update failed at ${formatTime(dashboard.failed_update.at, { withDate: false })}`,
       `The update script stopped three times in a row, the last one with an empty cache: ${dashboard.failed_update.error}`);
   if (age > dashboard.settings.stale_after_hours * 3600000)
-    return summaryBadge("#log", "bad", `Last update ${formatAge(age)} ago: the cron job may have stopped`,
+    return summaryBadge("#log", "bad", `Last update ${formatAge(age)} ago (cron stopped?)`,
       `The update script runs every 3 hours, so it has probably stopped working. Check the cron job and the log.`);
   const errors = dashboard.errors.length, warnings = dashboard.warnings.length;
   const problems = [errors && plural(errors, "error"), warnings && plural(warnings, "warning")].filter(Boolean);
@@ -317,6 +321,15 @@ function shortChunkName(name) {
   return name.replace(/^wpt-[a-z0-9_]+-[a-z]+-/, "");
 }
 
+// The sum of the chunks' times, which is what the run cost; the time it took,
+// with the chunks running in parallel, is much shorter and goes in the tooltip.
+function runTimeLine(chunks) {
+  if (!chunks || chunks.unfinished || !chunks.run_seconds) return null;
+  const elapsed = chunks.first_started && chunks.last_resolved
+    ? `From the first chunk starting to the last one finishing: ${formatDuration(chunks.first_started, chunks.last_resolved)}` : null;
+  return element("div", { class: "note", title: elapsed }, `WPT time: ${formatSeconds(chunks.run_seconds)} across ${plural(chunks.total, "chunk")}`);
+}
+
 function taskGroupLink(chunks) {
   return chunks?.task_group_url ? link(chunks.task_group_url, "Taskcluster tasks") : null;
 }
@@ -413,6 +426,8 @@ function stateCell(portKey, cell, row, channelLabel) {
   const node = element("div", { class: `cell ${STATE_KIND[cell.color] || "none"}` }, top,
     details.map(detail => typeof detail === "string" ? element("div", { class: "detail" }, detail) : detail));
   if (chunks.retried) node.append(element("div", { class: "note" }, `${plural(chunks.retried, "chunk")} passed after a retry`));
+  const runTime = runTimeLine(cell.chunks);
+  if (runTime) node.append(runTime);
   if (links.length) node.append(element("div", { class: "links" }, links));
   if (row.stale && cell.state !== "commit_unavailable") node.append(element("div", { class: "stale-note" }, "Could not refresh this commit; showing the last data"));
   return node;
@@ -461,6 +476,8 @@ function uploadedCell(portKey, channel, cell, row, channelLabel) {
       link(buildUrl(portByKey(portKey).builder, info.tested_build.number), `build #${info.tested_build.number}`), ` of ${shortDate(utcDate(info.tested_build.started_at))}`));
   }
   if (cell.chunks?.retried) node.append(element("div", { class: "note" }, `${plural(cell.chunks.retried, "chunk")} passed after a retry`));
+  const runTime = runTimeLine(cell.chunks);
+  if (runTime) node.append(runTime);
   if (row.stale) node.append(element("div", { class: "stale-note" }, "Could not refresh this commit; showing the last data"));
   if (diff && diff.detail) {
     const button = element("button", { type: "button", class: "plain diff-toggle", "aria-expanded": String(isOpen) }, isOpen ? "Hide diff" : "Show diff");

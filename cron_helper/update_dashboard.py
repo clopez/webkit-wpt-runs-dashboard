@@ -63,7 +63,7 @@ SETTINGS = states.Settings()
 # An answer that parses but lacks the fields the script reads is as unusable as
 # a failed request, so it gets the same fallback instead of stopping the run.
 REQUEST_ERRORS = (FetchError, KeyError, TypeError, ValueError)
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 # A run that stops because of an unexpected error is tried again right away,
 # first with the same cache, in case the error was random, and then with an
 # empty one, in case the cache itself is what makes it fail.
