@@ -23,7 +23,7 @@ import sources
 import states
 from fetch import Fetcher, FetchError
 
-REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
+REPOSITORY = logs.REPOSITORY
 DEFAULT_DATA_DIR = REPOSITORY / "html" / "data"
 DEFAULT_CACHE_DIR = REPOSITORY / "cron_helper" / "cache"
 DEFAULT_ARCHIVE_DIR = REPOSITORY / "cron_helper" / "logs"
@@ -491,7 +491,7 @@ def update(args, logger, recorder, token):
 
 def error_text(error):
     location = traceback.extract_tb(error.__traceback__)[-1]
-    return f"{type(error).__name__}: {error} (at {pathlib.Path(location.filename).name}:{location.lineno})"
+    return logs.without_local_paths(f"{type(error).__name__}: {error} (at {pathlib.Path(location.filename).name}:{location.lineno})")
 
 
 def record_failed_update(data_dir, now, message):
@@ -548,7 +548,14 @@ def parse_args(argv):
     parser.add_argument("--log-archive-dir", default=str(DEFAULT_ARCHIVE_DIR), help="where the log lines older than 30 days go (default: %(default)s)")
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="where dashboard.json and the diffs are written (default: %(default)s)")
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="where the script keeps its cache (default: %(default)s)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # Resolved like the repository's own path, so that a path given through a
+    # symbolic link or relative to the current directory is still recognized
+    # as inside the repository and written relative to it in the log.
+    for name in ("log", "log_archive_dir", "data_dir", "cache_dir"):
+        if getattr(args, name):
+            setattr(args, name, str(pathlib.Path(getattr(args, name)).resolve()))
+    return args
 
 
 def take_lock(cache_dir):

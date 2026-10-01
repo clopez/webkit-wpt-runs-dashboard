@@ -392,6 +392,23 @@ class UpdaterTest(unittest.TestCase):
         self.assertFalse(update_dashboard.month_is_over("2026-09", datetime.date(2026, 9, 29)))
 
 
+class LocalPathTest(unittest.TestCase):
+    def test_an_unexpected_error_names_repository_paths_relative_to_it(self):
+        try:
+            open(update_dashboard.REPOSITORY / "html" / "data" / "missing" / "dashboard.json")
+        except OSError as error:
+            text = update_dashboard.error_text(error)
+        self.assertIn("'html/data/missing/dashboard.json'", text)
+        self.assertNotIn(str(update_dashboard.REPOSITORY), text)
+
+    def test_paths_given_on_the_command_line_are_resolved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            link = pathlib.Path(directory) / "repo"
+            link.symlink_to(update_dashboard.REPOSITORY)
+            args = update_dashboard.parse_args(["--cache-dir", str(link / "cron_helper" / "cache")])
+        self.assertEqual(args.cache_dir, str(update_dashboard.DEFAULT_CACHE_DIR))
+
+
 class RetryTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

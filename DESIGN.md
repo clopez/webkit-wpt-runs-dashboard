@@ -103,6 +103,14 @@ Everything lives in one repository:
   `ERROR:` prefix and problems the script worked around (for example a request
   that only succeeded when retried) carry `WARNING:`, so the page can show them
   in red and yellow.
+- The log is public, and so are the errors and warnings that `dashboard.json`
+  repeats, so a path inside the repository is written relative to it, for
+  example `cron_helper/cache/cache.json`, and the place where the repository
+  lives on the server stays private. That also covers the paths that Python
+  quotes in its own error messages. The paths given on the command line are
+  resolved first, because one that goes through a symbolic link would not
+  start like the repository's own path. A path outside the repository is
+  written in full.
 - The log file on the web always holds the last 30 calendar days, today
   included, as a rolling window. A failed rotation, or a line cut in the middle
   of a character, never stops the update. Each run of the script moves the lines older than that out of

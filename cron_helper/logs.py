@@ -12,6 +12,14 @@ KEPT_DAYS = 90
 BLOCK_DAYS = 30
 BLOCK_EPOCH = datetime.date(2000, 1, 1)
 LOGGER_NAME = "webkit_wpt_runs_dashboard"
+REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
+
+
+def without_local_paths(text):
+    """The log and the errors in dashboard.json are public, so paths inside the
+    repository are written relative to it, keeping where it lives on the
+    server private. Paths given outside the repository stay as they are."""
+    return text.replace(f"{REPOSITORY}{os.sep}", "")
 
 
 class DashboardFormatter(logging.Formatter):
@@ -19,7 +27,7 @@ class DashboardFormatter(logging.Formatter):
 
     def format(self, record):
         timestamp = datetime.datetime.fromtimestamp(record.created).astimezone().strftime(TIMESTAMP_FORMAT)
-        message = record.getMessage().replace("\r", " ").replace("\n", " | ")
+        message = without_local_paths(record.getMessage()).replace("\r", " ").replace("\n", " | ")
         return f"[{timestamp}] {self.PREFIXES.get(record.levelno, '')}{message}"
 
 
@@ -30,7 +38,7 @@ class ProblemRecorder(logging.Handler):
         self.warnings = []
 
     def emit(self, record):
-        message = record.getMessage().replace("\n", " | ")
+        message = without_local_paths(record.getMessage()).replace("\n", " | ")
         (self.errors if record.levelno >= logging.ERROR else self.warnings).append(message)
 
 

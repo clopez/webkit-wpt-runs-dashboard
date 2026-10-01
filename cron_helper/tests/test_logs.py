@@ -22,6 +22,16 @@ class FormatterTest(unittest.TestCase):
     def test_lines_start_with_the_filter_test_logs_timestamp(self):
         self.assertRegex(self.format(logging.INFO, "Starting update"), r"^\[\d{4}-\d{2}-\d{2}\|\d{2}:\d{2}:\d{2}\|[^\]]+\] Starting update$")
 
+    def test_paths_inside_the_repository_are_written_relative_to_it(self):
+        cache = logs.REPOSITORY / "cron_helper" / "cache" / "cache.json"
+        self.assertRegex(self.format(logging.WARNING, f"Could not read {cache} ([Errno 13] Permission denied: '{cache}')"),
+                         r"\] WARNING: Could not read cron_helper/cache/cache.json \(\[Errno 13\] Permission denied: 'cron_helper/cache/cache.json'\)$")
+
+    def test_the_errors_kept_for_the_page_have_no_repository_paths_either(self):
+        recorder = logs.ProblemRecorder()
+        recorder.emit(logging.LogRecord(logs.LOGGER_NAME, logging.ERROR, __file__, 1, f"{logs.REPOSITORY}/html/data is full", None, None))
+        self.assertEqual(recorder.errors, ["html/data is full"])
+
     def test_errors_and_warnings_have_a_prefix_and_stay_on_one_line(self):
         self.assertRegex(self.format(logging.ERROR, "it broke\nbadly"), r"\] ERROR: it broke \| badly$")
         self.assertRegex(self.format(logging.WARNING, "retried"), r"\] WARNING: retried$")
