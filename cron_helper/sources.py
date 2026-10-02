@@ -111,12 +111,14 @@ def wptfyi_summary(fetcher, results_url):
     return summary
 
 
-def wptfyi_upload_statuses(fetcher):
-    """wpt.fyi's recent uploads, leaving out any entry that is not a well-formed
+def wptfyi_upload_statuses(fetcher, stage=None):
+    """wpt.fyi's latest 500 uploads, or with stage (for example "invalid") the
+    latest 500 in that stage, leaving out any entry that is not a well-formed
     record, because one bad entry should not hide the others."""
-    entries = fetcher.get_json(f"{WPTFYI_ROOT}/api/status", "wptfyi")
+    url = f"{WPTFYI_ROOT}/api/status" + (f"/{stage}" if stage else "")
+    entries = fetcher.get_json(url, "wptfyi")
     if not isinstance(entries, list):
-        raise FetchError(f"{WPTFYI_ROOT}/api/status: not a list")
+        raise FetchError(f"{url}: not a list")
     return [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), int) and is_time(entry.get("created"))]
 
 

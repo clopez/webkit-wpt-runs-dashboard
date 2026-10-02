@@ -209,6 +209,22 @@ class UpdaterTest(unittest.TestCase):
         statuses = self.updater(fetcher).upload_statuses()
         self.assertEqual([entry["id"] for entry in statuses[(SHA, "webkitgtk")]], [2])
 
+    def test_a_rejected_upload_too_old_for_the_latest_list_is_read_from_the_invalid_one(self):
+        rejected = {"id": 3, "browser_name": "webkitgtk_minibrowser", "browser_version": "", "full_revision_hash": SHA,
+                    "stage": "INVALID", "error": "Conflicting 'browser_version'", "created": "2026-09-27T10:00:00Z", "updated": ""}
+        fetcher = FakeFetcher({"api/status/invalid": [rejected], "api/status": []})
+        statuses = self.updater(fetcher).upload_statuses()
+        self.assertEqual([entry["id"] for entry in statuses[(SHA, "webkitgtk")]], [3])
+        self.assertEqual([url.rsplit("/api/", 1)[1] for url in fetcher.urls], ["status", "status/invalid"])
+
+    def test_one_status_list_failing_does_not_hide_the_other(self):
+        rejected = {"id": 3, "browser_name": "webkitgtk", "browser_version": "", "full_revision_hash": SHA,
+                    "stage": "INVALID", "error": "x", "created": "2026-09-27T10:00:00Z", "updated": ""}
+        fetcher = FakeFetcher(lambda url: [rejected] if url.endswith("/invalid") else (_ for _ in ()).throw(FetchError("HTTP 503", status=503)))
+        with self.assertLogs("test_update", level="ERROR"):
+            statuses = self.updater(fetcher).upload_statuses()
+        self.assertEqual([entry["id"] for entry in statuses[(SHA, "webkitgtk")]], [3])
+
     def test_a_shared_commit_uses_one_github_lookup_per_run(self):
         cache = {"version": update_dashboard.CACHE_VERSION}
         replies = self.replies(gtk_state="failed")

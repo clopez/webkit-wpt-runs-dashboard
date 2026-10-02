@@ -338,12 +338,20 @@ cd cron_helper && python3 -m unittest discover -s tests
      - wpt.fyi only creates it when there is an earlier run to compare with;
      - stable and beta both get the same name, `wpt.fyi - webkitgtk`;
      - its conclusion is never `failure`.
-7. **Rejected uploads**: `GET https://wpt.fyi/api/status`.
-   - This is wpt.fyi's list of recent uploads, with `stage` (`VALID`,
-     `INVALID`, `EMPTY`, `DUPLICATE`, …) and `error`.
-   - It has no filters and only returns the latest 500 entries, which is about
-     one day, so the script saves the entries for our runs in its cache (see
-     "Cache").
+7. **Rejected uploads**: `GET https://wpt.fyi/api/status` and
+   `GET https://wpt.fyi/api/status/invalid`.
+   - The first is wpt.fyi's list of recent uploads, with `stage` (`VALID`,
+     `INVALID`, `EMPTY`, `DUPLICATE`, …) and `error`. It only returns the
+     latest 500 entries of all browsers, which is about one day, so the script
+     saves the entries for our runs in its cache (see "Cache").
+   - The second is the same list with only the uploads in the `INVALID` stage,
+     also 500 entries, which reaches back about four weeks. The script reads
+     it too, because otherwise a run that wpt.fyi rejected more than a day
+     before the cache was created, or rebuilt, would say "cause unknown". If
+     one of the two requests fails, the other is still used.
+   - wpt.fyi shows the same data on its "Processor" page,
+     https://wpt.fyi/status, which is where a person can look up the error of
+     a rejected run. Taskcluster and GitHub do not have it.
    - Our entries have `browser_name` `webkitgtk` or `wpewebkit`, and are
      matched to a commit by `full_revision_hash`. They don't say the channel,
      so on a commit with a weekly tag the stable and beta cells of a port show
@@ -813,8 +821,8 @@ Most of the data never changes once a run is over, so the script keeps it in
   bot's history has been read in full;
 - **diffs**: the summary of the diff between two run IDs, which never changes,
   with its detail file in `html/data/diffs/`;
-- **wpt.fyi upload statuses**: our entries of `/api/status`, kept after wpt.fyi
-  drops them from its list;
+- **wpt.fyi upload statuses**: our entries of `/api/status` and
+  `/api/status/invalid`, kept after wpt.fyi drops them from its lists;
 - **the last lists of wpt.fyi runs**, used only when wpt.fyi fails to answer.
 
 The commits and diffs no longer used by any row, the diff files nothing points

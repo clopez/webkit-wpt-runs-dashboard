@@ -211,13 +211,17 @@ class Updater:
     def upload_statuses(self):
         stored = self.cache["upload_statuses"]
         products = {port["product"]: port for port in PORTS} | {port["browser"]: port for port in PORTS}
-        try:
-            for entry in sources.wptfyi_upload_statuses(self.fetcher):
-                if entry.get("browser_name") in products:
-                    stored[str(entry["id"])] = {key: entry.get(key) for key in (
-                        "id", "browser_name", "browser_version", "full_revision_hash", "stage", "error", "created", "updated")}
-        except REQUEST_ERRORS as error:
-            self.logger.error(f"Could not read the wpt.fyi upload statuses: {error}")
+        # The list of all the uploads only covers about a day, so a run that
+        # wpt.fyi rejected before the cache existed is only in the list of the
+        # rejected ones, which goes back weeks.
+        for stage in (None, "invalid"):
+            try:
+                for entry in sources.wptfyi_upload_statuses(self.fetcher, stage):
+                    if entry.get("browser_name") in products:
+                        stored[str(entry["id"])] = {key: entry.get(key) for key in (
+                            "id", "browser_name", "browser_version", "full_revision_hash", "stage", "error", "created", "updated")}
+            except REQUEST_ERRORS as error:
+                self.logger.error(f"Could not read the wpt.fyi {stage or 'latest'} upload statuses: {error}")
         since = self.since.isoformat()
         for key in [key for key, entry in stored.items() if (entry["created"] or "") < since]:
             del stored[key]
