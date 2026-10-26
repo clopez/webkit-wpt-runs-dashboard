@@ -28,15 +28,17 @@ The work is split in two, because the information has to be there as soon as
 the page loads, and gathering it takes many requests to GitHub, Taskcluster and
 wpt.fyi that no visitor should have to wait for:
 
-- a Python script on the server runs every 3 hours from cron. It gathers
+- a Python script on the server runs every hour from cron. It gathers
   everything, decides the state of each cell, computes the diffs, and writes a
   single JSON file;
 - a static page reads that JSON and draws it. It never talks to GitHub,
   Taskcluster or wpt.fyi itself, apart from the links the visitor clicks.
 
-Every 3 hours is enough because the runs are daily at most. However, it means
-the page always shows the state as it was when the script last ran, so the page
-says when that was.
+The runs are daily at most, but a run in progress changes during the day: its
+chunks finish, it waits for the suite, it is uploaded, and the estimate of when
+it will finish moves with the queue. Running every hour keeps that fresh, and a
+normal update costs only some 30 to 50 requests. However, the page always shows
+the state as it was when the script last ran, so the page says when that was.
 
 ### Repository layout
 
@@ -158,7 +160,7 @@ Everything lives in one repository:
 - It writes `dashboard.json` to a temporary name and then renames it, so the
   browser never reads a half-written file.
 - If a run stops because of an unexpected error, which the fallbacks above did
-  not handle, the script tries again right away instead of waiting 3 hours for
+  not handle, the script tries again right away instead of waiting an hour for
   cron, up to 3 attempts in all:
   1. the normal run;
   2. again with the same cache, a minute later, in case the error was random;
@@ -203,8 +205,8 @@ Everything lives in one repository:
 - It always shows when the data was generated. If the last update failed
   after its three attempts, the "Last update" badge turns red right away
   ("Last update failed at 12:00"), with the error in its tooltip. If the data
-  is more than 7 hours old, which means about two missed runs of the script,
-  the badge turns red and says so ("Last update 10 hours ago (cron
+  is more than 3 hours old, which means about two missed runs of the script,
+  the badge turns red and says so ("Last update 5 hours ago (cron
   stopped?)"), because the script has probably stopped running. That replaces
   what the badge says about the errors and warnings of the last run, so the
   header never shows a green "no errors" next to data that is too old.
@@ -224,18 +226,19 @@ Everything lives in one repository:
 
 ## Running it
 
-The web server serves `html/`. Cron runs the script every 3 hours, with the
+The web server serves `html/`. Cron runs the script every hour, with the
 token in the environment and the log in `html/data/`:
 
 ```
-0 */3 * * * cd /path/to/this/repo && GITHUB_TOKEN=... python3 cron_helper/update_dashboard.py --log html/data/cron_helper.log.txt
+0 * * * * cd /path/to/this/repo && GITHUB_TOKEN=... python3 cron_helper/update_dashboard.py --log html/data/cron_helper.log.txt
 ```
 
 The script takes its own lock, so a run that starts while the previous one is
 still going logs that and stops.
 The first run fills the cache with the last `MAX_AGE_DAYS` days, which takes
-about 10 minutes and some 550 requests; later runs take about 10 seconds and
-some 20 requests. [README.md](README.md) has the full instructions: the token,
+about 15 minutes and some 1,100 requests (about 150 of them to GitHub); later
+runs take 15 to 40 seconds and some 30 to 50 requests (about 6 to GitHub), the
+most while a run is in progress. [README.md](README.md) has the full instructions: the token,
 the cron job, the web server, and how to try it locally.
 
 The unit tests need no network:
@@ -296,7 +299,7 @@ cd cron_helper && python3 -m unittest discover -s tests
      answer whole in memory before sending it.
    - The pages are cut by position in the order of the task IDs, so they are
      not one snapshot. A task's state can be a few seconds older than another
-     page's, which does not matter for data refreshed every 3 hours. A task
+     page's, which does not matter for data refreshed every hour. A task
      added to the group between two pages (rare once a push has started; a
      retried chunk is a new run of the same task, not a new task) shifts the
      later ones, so one task can come again at the top of the next page; the
@@ -479,10 +482,10 @@ hours. So the 48-hour state only covers the rare case where GitHub never
 records the suite as finished.
 
 The grace period is 7 hours after the suite finished. Because the script runs
-every 3 hours, that means at least two runs of the script have looked for the
-run on wpt.fyi before the cell turns red, so a slow upload is never reported as
-a failure. In the cases measured, the run appeared on wpt.fyi 26 to 70 minutes
-after the suite finished. So a missing upload shows as red between 7 and 10
+every hour, that means some six runs of the script have looked for the run on
+wpt.fyi before the cell turns red, so a slow upload is never reported as a
+failure. In the cases measured, the run appeared on wpt.fyi 26 to 70 minutes
+after the suite finished. So a missing upload shows as red between 7 and 8
 hours after the suite finished.
 
 When a run is not uploaded, the cell tries to explain why:
@@ -675,7 +678,7 @@ WPT runs of 09-23, 09-24 and 09-25 all tested the same build, `321570@main`.
 The two bots are `GTK-Linux-64bit-Release-Packaging-Nightly` and
 `WPE-Linux-64bit-Release-Packaging-Nightly`. They build once a day, starting at
 about 05:00 UTC and finishing between 2 and 8 hours later, so the script's
-3-hour cycle is more than enough.
+hourly cycle is more than enough.
 
 ### Data flow
 
@@ -817,9 +820,17 @@ right. From top to bottom:
 
 1. **Header**, across both columns, in two lines:
    - the first line is about the dashboard's own data: the title, when the
-     data was generated, and the "Last update" badge, which links to the log.
+     data was generated and when the next update is expected, and the "Last
+     update" badge, which links to the log. The script cannot read cron's
+     schedule, so `UPDATE_EVERY_MINUTES` in the script says it, and has to
+     match the cron line; the next update is the next multiple of it from
+     midnight UTC, which is when cron runs such a line, even after an update
+     started by hand. Because the page reloads its data every 5 minutes, it
+     says "any moment now" for 10 minutes after that time before it calls the
+     update late. It reads, for example, "Data from 2026-10-26 18:18 UTC (29
+     minutes ago, next update in 13 minutes)".
      It shows the errors and warnings of the script's last run, or turns red
-     when the data is more than 7 hours old. The theme button sits at its
+     when the data is more than 3 hours old. The theme button sits at its
      right end;
    - the second line is about the runs, with badges that each take the
      latest build or run whose outcome is known, leaving out the ones still in
@@ -885,7 +896,7 @@ cannot shift the cells of the other days.
   "requests": {"buildbot": 2, "github": 21, "releases": 6, "taskcluster": 2, "wptfyi": 8},
   "errors": ["…"],
   "warnings": ["…"],
-  "settings": {"max_age_days": 60, "stale_after_hours": 7, "upload_grace_hours": 7,
+  "settings": {"max_age_days": 60, "stale_after_hours": 3, "update_every_minutes": 60, "upload_grace_hours": 7,
                "suite_timeout_hours": 48, "check_run_limit": 500},
   "ports": [{"key": "wpe", "label": "WPE WebKit", "product": "wpewebkit",
              "builder": "WPE-Linux-64bit-Release-Packaging-Nightly", "site": "wpewebkit.org"}, "…"],
@@ -1042,7 +1053,7 @@ The settings are constants at the top of the files:
 
 - `update_dashboard.py`: `ATTEMPTS` 3 and `RETRY_PAUSE_SECONDS` 60,
   `BUILD_EXTRA_DAYS` 3,
-  `MAX_AGE_DAYS` 60, `STALE_AFTER_HOURS` 7,
+  `MAX_AGE_DAYS` 60, `UPDATE_EVERY_MINUTES` 60, `STALE_AFTER_HOURS` 3,
   `FINAL_AFTER_SUITE_HOURS` 24, `FINAL_AFTER_TAG_HOURS` 72,
   `DECISION_DEADLINE_HOURS` 24,
   `FIRST_BUILD_FETCH` 70, `BUILD_FETCH` 10 and `CHECK_RUN_LOOKUPS` 8;

@@ -182,13 +182,32 @@ function header() {
   const freshness = element("div", { class: "freshness badges" });
   if (dashboard) {
     const age = Date.now() - new Date(dashboard.generated_at);
-    generated.append(element("span", {}, "Data from ", element("b", {}, formatTime(dashboard.generated_at)), ` (${formatAge(age)} ago)`));
+    generated.append(element("span", {}, "Data from ", element("b", {}, formatTime(dashboard.generated_at)), ` (${formatAge(age)} ago${nextUpdateText()})`));
     generated.append(lastUpdateBadge(age));
     freshness.append(element("span", { class: "last-runs" }, "Last nightlies:", buildsBadge(), wptRunsBadge(dashboard.daily, "nightly", "#nightly")));
     for (const channel of RELEASE_CHANNELS)
       freshness.append(element("span", { class: "last-runs" }, `Last ${channel}:`, bundlesBadge(channel), wptRunsBadge(dashboard.weekly, channel, "#weekly")));
   }
   return element("header", { class: "app-head" }, element("h1", {}, "WebKit WPT runs (Linux)"), generated, element("div", { class: "head-right" }, sourceLink(), themeButton()), freshness);
+}
+
+// The page only reloads its data every few minutes, so a new update can be on
+// the server for a while before the page shows it; only after this long is
+// an update that has not arrived called late.
+const NEXT_UPDATE_SLACK_MINUTES = REFRESH_MINUTES * 2;
+
+// Cron runs the script at fixed times, every so many minutes from midnight UTC,
+// so the next update is the first of those times after the data was generated,
+// even when the last update was started by hand.
+function nextUpdateText() {
+  const every = dashboard.settings.update_every_minutes;
+  if (!every) return "";
+  const period = every * 60000;
+  const next = (Math.floor(new Date(dashboard.generated_at) / period) + 1) * period;
+  const left = next - Date.now();
+  if (left >= 60000) return `, next update in ${formatAge(left)}`;
+  if (-left <= NEXT_UPDATE_SLACK_MINUTES * 60000) return ", next update any moment now";
+  return `, next update ${formatAge(-left)} late`;
 }
 
 // The errors and warnings of the script's last run, unless the last update
@@ -199,7 +218,7 @@ function lastUpdateBadge(age) {
       `The update script stopped three times in a row, the last one with an empty cache: ${dashboard.failed_update.error}`);
   if (age > dashboard.settings.stale_after_hours * 3600000)
     return summaryBadge("#log", "bad", `Last update ${formatAge(age)} ago (cron stopped?)`,
-      `The update script runs every 3 hours, so it has probably stopped working. Check the cron job and the log.`);
+      `The update script runs every hour, so it has probably stopped working. Check the cron job and the log.`);
   const errors = dashboard.errors.length, warnings = dashboard.warnings.length;
   const problems = [errors && plural(errors, "error"), warnings && plural(warnings, "warning")].filter(Boolean);
   return summaryBadge("#log", errors ? "bad" : warnings ? "wait" : "ok",

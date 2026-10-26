@@ -3,7 +3,7 @@
 Taskcluster, their results on wpt.fyi and the nightly packaging builds on
 build.webkit.org, and writes html/data/dashboard.json for the dashboard page.
 
-Meant to run from cron every 3 hours, with the GitHub token in the
+Meant to run from cron every hour, with the GitHub token in the
 GITHUB_TOKEN environment variable."""
 
 import argparse
@@ -39,7 +39,13 @@ RELEASE_CHANNELS = ["stable", "beta"]
 ALL_CHANNELS = ["nightly", "stable", "beta"]
 
 MAX_AGE_DAYS = 60
-STALE_AFTER_HOURS = 7
+# How often cron runs the script, which the script cannot read from cron
+# itself: it has to match the cron line in the README, "0 * * * *". The page
+# uses it to say when the next update is due, at the next multiple of it
+# counted from midnight UTC, which is when such a cron line runs.
+UPDATE_EVERY_MINUTES = 60
+# About two missed runs.
+STALE_AFTER_HOURS = 3
 # A commit's Taskcluster data is final once none of its chunks is running, and
 # either its suite finished a day ago and its newest tag is a day old, or its
 # newest tag is 3 days old, because Taskcluster ends every task within a day.
@@ -576,7 +582,7 @@ def update(args, logger, recorder, token):
         "requests": requests,
         "errors": recorder.errors,
         "warnings": recorder.warnings,
-        "settings": {"max_age_days": MAX_AGE_DAYS, "stale_after_hours": STALE_AFTER_HOURS,
+        "settings": {"max_age_days": MAX_AGE_DAYS, "stale_after_hours": STALE_AFTER_HOURS, "update_every_minutes": UPDATE_EVERY_MINUTES,
                      "upload_grace_hours": SETTINGS.upload_grace_hours, "suite_timeout_hours": SETTINGS.suite_timeout_hours,
                      "check_run_limit": SETTINGS.check_run_limit},
         "ports": [{key: port[key] for key in ("key", "label", "product", "builder", "site")} for port in PORTS],

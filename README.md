@@ -15,7 +15,7 @@ so this page shows it all at once. For each port it shows:
   otherwise with the reason and links to the failed chunks and their logs;
 - what changed since the previous run on wpt.fyi, by directory and by file.
 
-It has two parts. A Python script runs from cron every 3 hours, gathers the
+It has two parts. A Python script runs from cron every hour, gathers the
 data and writes it as JSON, and a static page draws that JSON. So the page
 loads at once, and visitors never query GitHub, Taskcluster or wpt.fyi
 themselves. [DESIGN.md](DESIGN.md) explains how every piece works and why.
@@ -28,7 +28,7 @@ themselves. [DESIGN.md](DESIGN.md) explains how every piece works and why.
 - **A GitHub token**, which only has to read public data. The script refuses to
   run without one, because without a token GitHub allows only 60 requests per
   hour, and with one it allows 5,000, which leaves plenty of room: a normal run
-  makes about 20 requests, and the first one about 550.
+  makes about 6 requests to GitHub, and the first one about 150.
 - **A web server** that serves static files. There is no server-side code.
 
 
@@ -58,7 +58,7 @@ which are public.
 ### 2. The first run
 
 Run the script once by hand before adding it to cron. The first run fills its
-cache with the last 60 days, so it takes about 10 minutes:
+cache with the last 60 days, so it takes about 15 minutes:
 
 ```sh
 cd /path/to/this/repo
@@ -74,10 +74,13 @@ seconds.
 
 ### 3. The cron job
 
-Add this line with `crontab -e`, so the script runs every 3 hours:
+Add this line with `crontab -e`, so the script runs every hour. If you choose
+another schedule, change `UPDATE_EVERY_MINUTES` in
+`cron_helper/update_dashboard.py` to match it, because the page uses it to say
+when the next update is due:
 
 ```
-0 */3 * * * cd /path/to/this/repo && GITHUB_TOKEN=$(cat $HOME/.config/webkit-wpt-runs-dashboard/github-token) python3 cron_helper/update_dashboard.py --log html/data/cron_helper.log.txt
+0 * * * * cd /path/to/this/repo && GITHUB_TOKEN=$(cat $HOME/.config/webkit-wpt-runs-dashboard/github-token) python3 cron_helper/update_dashboard.py --log html/data/cron_helper.log.txt
 ```
 
 The script takes a lock itself, in its cache directory, so a run that starts
@@ -87,7 +90,7 @@ finds `html/data/` and its cache from where it lives. With `--log`, the
 script writes nothing to stdout or stderr, so cron sends no emails: everything
 goes to the log, which the page shows at its bottom. If a run stops because of
 an unexpected error, the script tries twice more right away, the last time with
-an empty cache, so a single failure doesn't have to wait 3 hours for the next
+an empty cache, so a single failure doesn't have to wait an hour for the next
 run.
 
 ### 4. The web server
@@ -131,7 +134,7 @@ purpose, and the token is never written anywhere by the script.
 To update the dashboard, pull the new version into the repository. The cron
 job uses it on its next run. When a new version changes the format of the
 cache, the script notices, starts with an empty one and logs a warning, so that
-run takes about 10 minutes again.
+run takes about 15 minutes again.
 
 
 ## Trying it locally
@@ -173,7 +176,7 @@ full width and at a phone's width.
 ## When something goes wrong
 
 - The **"Last update"** badge at the top turns red when the last update failed,
-  or when the data is more than 7 hours old, which usually means cron stopped
+  or when the data is more than 3 hours old, which usually means cron stopped
   running the script.
 - The **log** at the bottom of the page, and in
   `html/data/cron_helper.log.txt`, has every run, with `ERROR:` and `WARNING:`
