@@ -1,4 +1,5 @@
 import datetime
+import re
 import urllib.parse
 
 from fetch import FetchError
@@ -149,6 +150,51 @@ def failed_build_steps(fetcher, buildid):
     steps = fetcher.get_json(f"{BUILDBOT_ROOT}/api/v2/builds/{buildid}/steps", "buildbot")["steps"]
     return [{"number": step["number"], "name": step["name"], "state_string": step["state_string"]}
             for step in steps if step["complete"] and step["results"] not in PASSING_STEP_RESULTS]
+
+
+# The minor version of a release says its channel: even for stable, odd for
+# the development releases that the beta bundles are built from.
+RELEASE_CHANNEL_BY_PARITY = {0: "stable", 1: "beta"}
+LISTING_ROW = re.compile(r'<a href="(?P<name>[^"?/][^"]*)">[^<]*</a>\s*</td>\s*<td[^>]*>\s*(?P<time>\d{4}-\d\d-\d\d \d\d:\d\d)')
+
+
+def release_version(text):
+    return tuple(int(part) for part in text.split("."))
+
+
+def latest_releases(fetcher, site, tarball_prefix):
+    """The newest release of each channel in the site's releases folder, by
+    version number rather than by date, because an older branch can get a
+    release after a newer branch has started. The folder is an Apache index,
+    whose times are UTC."""
+    url = f"https://{site}/releases/"
+    tarball = re.compile(rf"{re.escape(tarball_prefix)}-(\d+\.\d+\.\d+)\.tar\.xz")
+    latest = {}
+    for row in LISTING_ROW.finditer(fetcher.get_bytes(url, "releases", decode=lambda body: body.decode("utf-8"))):
+        match = tarball.fullmatch(row["name"])
+        if not match:
+            continue
+        version = match[1]
+        channel = RELEASE_CHANNEL_BY_PARITY[release_version(version)[1] % 2]
+        if channel not in latest or release_version(version) > release_version(latest[channel]["version"]):
+            latest[channel] = {"version": version, "published_at": row["time"].replace(" ", "T") + ":00Z", "url": url + row["name"]}
+    if set(latest) != set(RELEASE_CHANNEL_BY_PARITY.values()):
+        raise FetchError(f"{url}: found no {tarball_prefix} release for {', '.join(sorted(set(RELEASE_CHANNEL_BY_PARITY.values()) - set(latest)))}")
+    return latest
+
+
+def bundle_folder_url(site, channel):
+    return f"https://{site}/built-products/x86_64/release/{channel}/MiniBrowser/"
+
+
+def latest_bundle(fetcher, site, channel):
+    """The bundle that WPT installs for a channel: LAST-IS names the newest one."""
+    url = bundle_folder_url(site, channel) + "LAST-IS"
+    name = fetcher.get_bytes(url, "releases", decode=lambda body: body.decode("utf-8")).strip()
+    match = re.fullmatch(r"MiniBrowser_[a-z]+_(\d+\.\d+\.\d+)\.tar\.xz", name)
+    if not match:
+        raise FetchError(f"{url}: unexpected bundle name {name[:80]!r}")
+    return {"version": match[1], "file": name, "url": bundle_folder_url(site, channel)}
 
 
 def to_iso(timestamp):

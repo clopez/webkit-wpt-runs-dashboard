@@ -30,11 +30,12 @@ DEFAULT_ARCHIVE_DIR = REPOSITORY / "cron_helper" / "logs"
 
 PORTS = [
     {"key": "wpe", "label": "WPE WebKit", "browser": "wpewebkit_minibrowser", "product": "wpewebkit",
-     "builder": "WPE-Linux-64bit-Release-Packaging-Nightly"},
+     "builder": "WPE-Linux-64bit-Release-Packaging-Nightly", "site": "wpewebkit.org"},
     {"key": "gtk", "label": "WebKitGTK", "browser": "webkitgtk_minibrowser", "product": "webkitgtk",
-     "builder": "GTK-Linux-64bit-Release-Packaging-Nightly"},
+     "builder": "GTK-Linux-64bit-Release-Packaging-Nightly", "site": "webkitgtk.org"},
 ]
 CHANNELS_BY_TAG_KIND = {"daily": ["nightly"], "weekly": ["stable", "beta"]}
+RELEASE_CHANNELS = ["stable", "beta"]
 ALL_CHANNELS = ["nightly", "stable", "beta"]
 
 MAX_AGE_DAYS = 60
@@ -87,7 +88,7 @@ def write_json_atomically(path, data):
     os.replace(temporary, path)
 
 
-CACHE_SECTIONS = ("tag_months", "commits", "builds", "build_history_complete", "diffs", "upload_statuses", "wptfyi_runs")
+CACHE_SECTIONS = ("tag_months", "commits", "builds", "build_history_complete", "diffs", "upload_statuses", "wptfyi_runs", "releases")
 
 
 def load_cache(path, logger):
@@ -206,6 +207,40 @@ class Updater:
             self.all_builds[port["key"]] = sorted(known.values(), key=lambda build: build["number"], reverse=True)
             shown = [build for build in self.all_builds[port["key"]] if build["started_at"] >= self.since.isoformat()]
             result[port["key"]] = {"builder": port["builder"], "stale": stale, "builds": shown}
+        return result
+
+    def releases(self):
+        """For each port and release channel, the newest release and the newest
+        bundle, and whether the bundle is the build of that release. The build
+        of the stable and beta bundles still has to be triggered by hand after
+        each release, so an outdated bundle means that a build is due."""
+        result = {}
+        for port in PORTS:
+            known = self.cache["releases"].setdefault(port["key"], {})
+            try:
+                released = sources.latest_releases(self.fetcher, port["site"], port["product"])
+                listing_stale = False
+            except REQUEST_ERRORS as error:
+                released = {channel: known.get(channel, {}).get("release") for channel in RELEASE_CHANNELS}
+                listing_stale = True
+                self.logger.error(f"Could not read the releases of {port['site']}: {error}; keeping the previous ones")
+            result[port["key"]] = {}
+            for channel in RELEASE_CHANNELS:
+                previous = known.get(channel, {})
+                try:
+                    bundle = sources.latest_bundle(self.fetcher, port["site"], channel)
+                    bundle_stale = False
+                except REQUEST_ERRORS as error:
+                    bundle = previous.get("bundle")
+                    bundle_stale = True
+                    self.logger.error(f"Could not read the {channel} bundle of {port['site']}: {error}; keeping the previous one")
+                release = released[channel]
+                for name, item in (("release", release), ("bundle", bundle)):
+                    if item and previous.get(name) and item["version"] != previous[name]["version"]:
+                        self.logger.info(f"{port['site']}: new {channel} {name} {item['version']}")
+                known[channel] = {"release": release, "bundle": bundle}
+                result[port["key"]][channel] = {"release": release, "bundle": bundle, "state": bundle_state(release, bundle),
+                                                "stale": listing_stale or bundle_stale}
         return result
 
     def upload_statuses(self):
@@ -451,6 +486,7 @@ def update(args, logger, recorder, token):
     updater = Updater(fetcher, logger, cache, args.data_dir, now)
 
     builds = updater.builds()
+    releases = updater.releases()
     statuses = updater.upload_statuses()
     wptfyi_runs = updater.wptfyi_runs()
     tags_by_kind = {kind: updater.tags(kind) for kind in CHANNELS_BY_TAG_KIND}
@@ -475,8 +511,9 @@ def update(args, logger, recorder, token):
         "settings": {"max_age_days": MAX_AGE_DAYS, "stale_after_hours": STALE_AFTER_HOURS,
                      "upload_grace_hours": SETTINGS.upload_grace_hours, "suite_timeout_hours": SETTINGS.suite_timeout_hours,
                      "check_run_limit": SETTINGS.check_run_limit},
-        "ports": [{key: port[key] for key in ("key", "label", "product", "builder")} for port in PORTS],
+        "ports": [{key: port[key] for key in ("key", "label", "product", "builder", "site")} for port in PORTS],
         "builds": builds,
+        "releases": releases,
         "daily": rows["daily"],
         "weekly": rows["weekly"],
     }
@@ -491,6 +528,13 @@ def update(args, logger, recorder, token):
     request_text = ", ".join(f"{service} {count}" for service, count in requests.items())
     logger.info(f"Wrote dashboard.json: {len(rows['daily'])} daily and {len(rows['weekly'])} weekly tags, {cells} cells"
                 + (f", {', '.join(problems)}" if problems else "") + f"; requests: {request_text}; {time.monotonic() - started:.1f} s")
+
+
+def bundle_state(release, bundle):
+    if not release or not bundle:
+        return "unknown"
+    # A bundle newer than the listing can only mean the listing is behind, so it is not a build to do.
+    return "current" if sources.release_version(bundle["version"]) >= sources.release_version(release["version"]) else "outdated"
 
 
 def error_text(error):

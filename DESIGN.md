@@ -229,7 +229,7 @@ The script takes its own lock, so a run that starts while the previous one is
 still going logs that and stops.
 The first run fills the cache with the last `MAX_AGE_DAYS` days, which takes
 about 10 minutes and some 550 requests; later runs take about 10 seconds and
-some 15 requests. [README.md](README.md) has the full instructions: the token,
+some 20 requests. [README.md](README.md) has the full instructions: the token,
 the cron job, the web server, and how to try it locally.
 
 The unit tests need no network:
@@ -653,9 +653,75 @@ ago are dropped.
   instead, because a failed build is the usual reason. When no build in the
   cache meets both, the cell doesn't name one.
 - Only the nightly WPT runs use these bundles. The stable and beta runs use
-  bundles from uploaders that are still private, so the dashboard ignores them
-  for now. When they become public, the code and this design will be updated
-  to show them too.
+  bundles that are built after each release, which have their own panel (see
+  "Stable and beta bundles").
+
+## Stable and beta bundles
+
+The weekly stable and beta WPT runs download their MiniBrowser bundle from
+`<site>/built-products/x86_64/release/<channel>/MiniBrowser/`, where the site
+is `webkitgtk.org` or `wpewebkit.org` and the channel is `stable` or `beta`.
+Unlike the nightly bundles, these are built after each release of WebKitGTK and
+WPE WebKit, and that build still has to be triggered by hand. When nobody
+triggers it, the weekly runs keep testing the previous release, so the
+dashboard checks, for each port and channel, whether the newest bundle is the
+build of the newest release. When it is not, a build is due.
+
+### Data flow
+
+These sites need no token. Each run makes 6 requests, 3 per port:
+
+1. **The releases**: `GET https://<site>/releases/`, an Apache index of every
+   release tarball, about 350 KB. The script reads the names
+   `webkitgtk-X.Y.Z.tar.xz` or `wpewebkit-X.Y.Z.tar.xz` and the time next to
+   each, which is UTC (it matches the `Last-Modified` of the files). The minor
+   version says the channel, as WebKit's release documentation describes: an
+   even `Y` is a stable release and an odd one a development release, which is
+   what the beta bundles are built from. The newest release of each channel is
+   the highest version, not the newest file, because an older stable branch can
+   still get a release after a newer one has started. For example, a 2.52.10
+   published after 2.53.1 is still the newest stable release, and a 2.50.7
+   published after 2.52.0 is not. webkitgtk.org also has `LATEST-STABLE-*` and
+   `LATEST-UNSTABLE-*` marker files, but wpewebkit.org does not, so the script
+   doesn't use them.
+2. **The bundle of each channel**:
+   `GET https://<site>/built-products/x86_64/release/<channel>/MiniBrowser/LAST-IS`,
+   whose content is the file name of the newest bundle, for example
+   `MiniBrowser_gtk_2.54.1.tar.xz`. This is the same file WPT reads to choose
+   what it installs (`tools/wpt/browser.py`).
+
+A bundle is **current** when its version is the newest release of its channel
+(or newer, which can only mean the listing is behind), and **outdated**
+otherwise. Right after a new stable major version, such as 2.54.0, the newest
+development release is still the last one before it, 2.53.92, so the beta
+bundle stays current until the next development release, 2.55.1, comes out.
+
+The history of the bundle folders shows why this check is useful: the bundles
+appeared days or weeks after their release, and many releases (for example
+2.54.0, 2.52.2 and 2.52.4 to 2.52.6) never got one.
+
+### Cache
+
+The cache keeps the last release and bundle of each port and channel. When a
+request fails, the script uses them and marks the data as stale, and the panel
+says it could not refresh. When a new release or a new bundle appears, the log
+says so, for example "webkitgtk.org: new stable bundle 2.54.2".
+
+### How it is shown
+
+- In the header, "Last stable:" and "Last beta:" each have a bundles badge,
+  next to the badge of the last WPT run of that channel: "bundles updated",
+  "bundles outdated", or "GTK bundle outdated" or "WPE bundle outdated" when
+  only one port is behind. It turns red as soon as a newer release exists,
+  without any grace period, because nothing will build the bundle until
+  someone triggers it. Hovering shows each port's release, when it was
+  published and its bundle, and clicking goes to the panel.
+- The panel "Stable and beta bundles", under the nightly bundles, has one row
+  per channel and one card per port. A card says whether the bundle is up to
+  date or outdated and its version, which release came out when, with a link
+  to its tarball, "A stable build of 2.54.2 is due" when it is outdated, a
+  link to the bundle folder, and the result of the last WPT run of that
+  channel, with the version it tested when it reached wpt.fyi.
 
 ## Layout
 
@@ -676,10 +742,10 @@ right. From top to bottom:
        passed", or "GTK build failed", "WPE build failed" or "builds failed".
        **WPT runs**: "WPT runs uploaded", or for example "GTK WPT run failed",
        "WPT runs not uploaded" or "WPE WPT run failed, GTK not uploaded";
-     - "Last stable WPT:" and "Last beta WPT:" have one badge each, with the
-       same wording but shorter, because the label already says what they
-       are about: "uploaded", "not uploaded", or "WPE failed, GTK not
-       uploaded".
+     - "Last stable:" and "Last beta:" have two badges each. **bundles**:
+       whether the bundle of that channel is the build of its newest release
+       (see "Stable and beta bundles"). **WPT runs**: the last weekly run of
+       that channel, with the same wording as the nightly one.
 
    The WPT badges say "uploaded" rather than "passed", because a green run can
    still have failing tests; green means the run reached wpt.fyi. A badge only
@@ -692,10 +758,12 @@ right. From top to bottom:
    bot on build.webkit.org. This block has a tinted background and a
    frame of its own, so it reads as clearly separate from the WPT runs below
    it: it is the input that the WPT runs test.
-3. **Nightly WPT runs**, in each column: one cell per daily tag.
-4. **Stable and beta WPT runs**, in each column: one row per weekly tag, with
+3. **Stable and beta bundles**, in each column, with the same frame: whether
+   the bundle of each channel is up to date with the newest release.
+4. **Nightly WPT runs**, in each column: one cell per daily tag.
+5. **Stable and beta WPT runs**, in each column: one row per weekly tag, with
    the stable and beta cells side by side.
-5. **The log**, across both columns.
+6. **The log**, across both columns.
 
 The rows of both columns line up by date, with the dates (and the hour of the
 tag) written once, down the middle. So each row holds the same day for both
@@ -720,18 +788,28 @@ cannot shift the cells of the other days.
 {
   "generated_at": "2026-09-29T18:31:04Z",
   "duration_seconds": 22.0,
-  "requests": {"buildbot": 2, "github": 21, "taskcluster": 2, "wptfyi": 7},
+  "requests": {"buildbot": 2, "github": 21, "releases": 6, "taskcluster": 2, "wptfyi": 8},
   "errors": ["…"],
   "warnings": ["…"],
   "settings": {"max_age_days": 60, "stale_after_hours": 7, "upload_grace_hours": 7,
                "suite_timeout_hours": 48, "check_run_limit": 500},
   "ports": [{"key": "wpe", "label": "WPE WebKit", "product": "wpewebkit",
-             "builder": "WPE-Linux-64bit-Release-Packaging-Nightly"}, "…"],
+             "builder": "WPE-Linux-64bit-Release-Packaging-Nightly", "site": "wpewebkit.org"}, "…"],
   "builds": {
     "wpe": {"builder": "WPE-Linux-64bit-Release-Packaging-Nightly", "stale": false, "builds": [
       {"number": 746, "buildid": 5830797, "identifier": "322032@main", "complete": true,
        "result": "success", "passed": true, "state_string": "build successful",
        "started_at": "…", "complete_at": "…", "failed_steps": []}]},
+    "gtk": {"…": "…"}
+  },
+  "releases": {
+    "wpe": {
+      "stable": {"release": {"version": "2.54.2", "published_at": "2026-10-23T11:58:00Z",
+                             "url": "https://wpewebkit.org/releases/wpewebkit-2.54.2.tar.xz"},
+                 "bundle": {"version": "2.54.1", "file": "MiniBrowser_wpe_2.54.1.tar.xz",
+                            "url": "https://wpewebkit.org/built-products/x86_64/release/stable/MiniBrowser/"},
+                 "state": "outdated", "stale": false},
+      "beta": {"…": "…"}},
     "gtk": {"…": "…"}
   },
   "daily": [
@@ -823,7 +901,9 @@ Most of the data never changes once a run is over, so the script keeps it in
   with its detail file in `html/data/diffs/`;
 - **wpt.fyi upload statuses**: our entries of `/api/status` and
   `/api/status/invalid`, kept after wpt.fyi drops them from its lists;
-- **the last lists of wpt.fyi runs**, used only when wpt.fyi fails to answer.
+- **the last lists of wpt.fyi runs**, used only when wpt.fyi fails to answer;
+- **releases**: the last release and bundle of each port and channel, used
+  when webkitgtk.org or wpewebkit.org fails to answer.
 
 The commits and diffs no longer used by any row, the diff files nothing points
 to, and the builds and upload statuses older than `MAX_AGE_DAYS` are removed.

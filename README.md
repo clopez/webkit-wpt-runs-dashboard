@@ -28,7 +28,7 @@ themselves. [DESIGN.md](DESIGN.md) explains how every piece works and why.
 - **A GitHub token**, which only has to read public data. The script refuses to
   run without one, because without a token GitHub allows only 60 requests per
   hour, and with one it allows 5,000, which leaves plenty of room: a normal run
-  makes about 15 requests, and the first one about 550.
+  makes about 20 requests, and the first one about 550.
 - **A web server** that serves static files. There is no server-side code.
 
 

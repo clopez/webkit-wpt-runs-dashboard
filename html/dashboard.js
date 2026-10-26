@@ -51,7 +51,7 @@ function element(tag, attributes = {}, ...children) {
   return node;
 }
 
-const LINKED_HOSTS = new Set(["github.com", "community-tc.services.mozilla.com", "wpt.fyi", "build.webkit.org"]);
+const LINKED_HOSTS = new Set(["github.com", "community-tc.services.mozilla.com", "wpt.fyi", "build.webkit.org", "webkitgtk.org", "wpewebkit.org"]);
 
 // Links built from API answers must not become javascript:, data: or another site.
 function safeHref(href) {
@@ -185,8 +185,8 @@ function header() {
     generated.append(element("span", {}, "Data from ", element("b", {}, formatTime(dashboard.generated_at)), ` (${formatAge(age)} ago)`));
     generated.append(lastUpdateBadge(age));
     freshness.append(element("span", { class: "last-runs" }, "Last nightlies:", buildsBadge(), wptRunsBadge(dashboard.daily, "nightly", "#nightly")));
-    freshness.append(element("span", { class: "last-runs" }, "Last stable WPT:", wptRunsBadge(dashboard.weekly, "stable", "#weekly", null)));
-    freshness.append(element("span", { class: "last-runs" }, "Last beta WPT:", wptRunsBadge(dashboard.weekly, "beta", "#weekly", null)));
+    for (const channel of RELEASE_CHANNELS)
+      freshness.append(element("span", { class: "last-runs" }, `Last ${channel}:`, bundlesBadge(channel), wptRunsBadge(dashboard.weekly, channel, "#weekly")));
   }
   return element("header", { class: "app-head" }, element("h1", {}, "WebKit WPT runs (Linux)"), generated, element("div", { class: "head-right" }, sourceLink(), themeButton()), freshness);
 }
@@ -320,6 +320,59 @@ function buildsSection() {
       element("small", {}, "build.webkit.org · WPT tests each bundle the next night"),
       stale.length ? element("small", { class: "stale-note" }, `Could not refresh the builds of ${stale.map(port => port.label).join(", ")}; showing the last ones`) : null),
     grid, moreRow("builds", dates.length));
+}
+
+// Stable and beta bundles
+
+const RELEASE_CHANNELS = ["stable", "beta"];
+
+function releaseAge(entry) {
+  return formatAge(Date.now() - new Date(entry.release.published_at));
+}
+
+function bundlesBadge(channel) {
+  const entries = dashboard.ports.map(port => ({ port, entry: dashboard.releases?.[port.key]?.[channel] }));
+  const title = entries.map(({ port, entry }) => !entry?.release || !entry?.bundle ? `${port.label}: not known`
+    : `${port.label}: ${entry.release.version} released ${formatTime(entry.release.published_at)} (${releaseAge(entry)} ago), bundle ${entry.bundle.version}`
+      + (entry.state === "outdated" ? ", a build is due" : "")).join("\n");
+  const outcomes = entries.map(({ port, entry }) => ({ port,
+    word: entry?.state === "current" ? "updated" : entry?.state === "outdated" ? "outdated" : "unknown" }));
+  return outcomeBadge("#releases", outcomes, { noun: "bundle", passing: "updated", nothingKnown: "bundles unknown", title });
+}
+
+function lastWptRunText(port, channel) {
+  const row = dashboard.weekly.find(candidate => DECIDED_WPT_STATES[candidate.cells[port.key]?.[channel]?.state]);
+  if (!row) return "No finished WPT run yet";
+  const cell = row.cells[port.key][channel];
+  return `Last WPT run, ${shortDate(row.date)}: ${cell.state === "uploaded" ? `on wpt.fyi, tested ${cell.wptfyi.browser_version}` : DECIDED_WPT_STATES[cell.state]}`;
+}
+
+function releaseNode(port, channel) {
+  const entry = dashboard.releases?.[port.key]?.[channel];
+  if (!entry?.release || !entry?.bundle)
+    return element("div", { class: "build" }, element("div", { class: "top" }, element("span", { class: "headline" }, "Not known yet")));
+  const outdated = entry.state === "outdated";
+  const node = element("div", { class: `build ${outdated ? "bad" : "ok"}` },
+    element("div", { class: "top" },
+      element("span", { class: "headline" }, outdated ? `Bundle outdated: ${entry.bundle.version}` : `Bundle ${entry.bundle.version} up to date`),
+      link(entry.bundle.url, "bundles", null, `The ${channel} bundles of ${port.label}`)),
+    element("span", { class: "when" }, `Released ${entry.release.version} on ${formatTime(entry.release.published_at)} (${releaseAge(entry)} ago) · `,
+      link(entry.release.url, "tarball")));
+  if (outdated) node.append(element("span", { class: "when" }, `A ${channel} build of ${entry.release.version} is due`));
+  node.append(element("span", { class: "when" }, lastWptRunText(port, channel)));
+  return node;
+}
+
+function releasesSection() {
+  const grid = element("div", { class: "aligned" });
+  for (const channel of RELEASE_CHANNELS)
+    grid.append(element("div", { class: "day-row" }, releaseNode(dashboard.ports[0], channel), element("div", { class: "spine" }, channel), releaseNode(dashboard.ports[1], channel)));
+  const stale = dashboard.ports.filter(port => RELEASE_CHANNELS.some(channel => dashboard.releases[port.key]?.[channel]?.stale));
+  return element("section", { class: "infra", id: "releases", "aria-label": "Stable and beta bundles" },
+    element("div", { class: "section-title" }, element("h2", {}, "Stable and beta bundles"),
+      element("small", {}, "webkitgtk.org and wpewebkit.org · WPT tests each bundle once a week"),
+      stale.length ? element("small", { class: "stale-note" }, `Could not refresh the releases of ${stale.map(port => port.label).join(", ")}; showing the last ones`) : null),
+    grid);
 }
 
 // WPT cells
@@ -769,12 +822,14 @@ function render() {
     parts.push(
       element("div", { class: "port-heads" }, element("div", { class: "port-head" }, dashboard.ports[0].label), element("div", { class: "spacer" }), element("div", { class: "port-head" }, dashboard.ports[1].label)),
       buildsSection(),
+      // Data written by a version of the script from before the releases were checked has none.
+      dashboard.releases ? releasesSection() : null,
       element("section", { class: "wpt", "aria-label": "WPT runs" },
         element("div", { class: "section-title" }, element("h2", {}, "WPT runs"), element("small", {}, "Taskcluster and wpt.fyi")),
         nightlySection(), weeklySection()));
   }
   parts.push(logSection());
-  page.replaceChildren(...parts);
+  page.replaceChildren(...parts.filter(Boolean));
   window.scrollTo(0, scrollY);
 }
 

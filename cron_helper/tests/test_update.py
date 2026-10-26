@@ -35,6 +35,10 @@ class FakeFetcher:
                 return reply
         raise FetchError(f"{url}: no reply in the test", status=404)
 
+    def get_bytes(self, url, service, decode=lambda body: body):
+        reply = self.get_json(url, service)
+        return decode(reply.encode() if isinstance(reply, str) else reply)
+
 
 def chunk_entry(browser, name, number, of, state="completed"):
     return {"task": {"metadata": {"name": f"wpt-{browser}-nightly-{name}-{number}",
@@ -46,6 +50,47 @@ def chunk_entry(browser, name, number, of, state="completed"):
 def run(run_id, sha, day, identifier):
     return {"id": run_id, "sha": sha, "time_start": f"2026-09-{day}T05:00:00Z", "created_at": f"2026-09-{day}T10:00:00Z",
             "browser_version": f"2.55.0 ({identifier})", "results_url": f"https://storage.example/{run_id}.json.gz"}
+
+
+def listing(*rows):
+    """An Apache index of a releases folder, as webkitgtk.org and wpewebkit.org serve it."""
+    return "<table>" + "".join(f'<tr><td><img alt="[   ]"></td><td><a href="{name}">{name}</a></td><td align="right">{time}  </td>'
+                               f'<td align="right">49M</td><td>&nbsp;</td></tr>\n' for name, time in rows) + "</table>"
+
+
+GTK_RELEASES = listing(("webkitgtk-2.54.2.tar.xz.asc", "2026-10-23 08:55"), ("webkitgtk-stable.tar.xz", "2026-10-23 08:55"),
+                       ("webkitgtk-2.54.2.tar.xz", "2026-10-23 08:55"), ("LATEST-STABLE-2.54.2", "2026-10-23 08:55"),
+                       ("webkitgtk-2.54.1.tar.xz", "2026-10-02 10:58"), ("webkitgtk-2.53.92.tar.xz", "2026-09-02 10:15"),
+                       ("webkitgtk-2.53.91.tar.xz", "2026-08-21 10:28"))
+
+
+class ReleasesTest(unittest.TestCase):
+    def test_the_newest_release_of_each_channel_is_chosen_by_version_and_not_by_date(self):
+        rows = listing(("webkitgtk-2.52.0.tar.xz", "2026-03-18 14:26"), ("webkitgtk-2.50.7.tar.xz", "2026-03-20 09:00"),
+                       ("webkitgtk-2.53.1.tar.xz", "2026-04-17 11:18"), ("webkitgtk-2.51.93.tar.xz", "2026-04-20 09:00"),
+                       ("webkitgtk-2.52.10.tar.xz", "2026-05-01 10:00"), ("webkitgtk-2.52.9.tar.xz", "2026-04-01 10:00"))
+        latest = sources.latest_releases(FakeFetcher({"releases/": rows}), "webkitgtk.org", "webkitgtk")
+        self.assertEqual({channel: release["version"] for channel, release in latest.items()}, {"stable": "2.52.10", "beta": "2.53.1"})
+        self.assertEqual(latest["stable"]["published_at"], "2026-05-01T10:00:00Z")
+        self.assertEqual(latest["stable"]["url"], "https://webkitgtk.org/releases/webkitgtk-2.52.10.tar.xz")
+
+    def test_a_listing_without_a_channel_is_an_error(self):
+        with self.assertRaisesRegex(FetchError, "no webkitgtk release for beta"):
+            sources.latest_releases(FakeFetcher({"releases/": listing(("webkitgtk-2.54.2.tar.xz", "2026-10-23 08:55"))}), "webkitgtk.org", "webkitgtk")
+
+    def test_the_bundle_version_comes_from_last_is(self):
+        bundle = sources.latest_bundle(FakeFetcher({"stable/MiniBrowser/LAST-IS": "MiniBrowser_gtk_2.54.1.tar.xz\n"}), "webkitgtk.org", "stable")
+        self.assertEqual(bundle, {"version": "2.54.1", "file": "MiniBrowser_gtk_2.54.1.tar.xz",
+                                  "url": "https://webkitgtk.org/built-products/x86_64/release/stable/MiniBrowser/"})
+        with self.assertRaisesRegex(FetchError, "unexpected bundle name"):
+            sources.latest_bundle(FakeFetcher({"LAST-IS": "<html>Not here</html>"}), "webkitgtk.org", "stable")
+
+    def test_a_bundle_is_current_only_when_it_is_the_build_of_the_newest_release(self):
+        state = update_dashboard.bundle_state
+        self.assertEqual(state({"version": "2.54.2"}, {"version": "2.54.1"}), "outdated")
+        self.assertEqual(state({"version": "2.54.2"}, {"version": "2.54.2"}), "current")
+        self.assertEqual(state({"version": "2.54.9"}, {"version": "2.54.10"}), "current")
+        self.assertEqual(state(None, {"version": "2.54.2"}), "unknown")
 
 
 class UpdaterTest(unittest.TestCase):
@@ -224,6 +269,44 @@ class UpdaterTest(unittest.TestCase):
         with self.assertLogs("test_update", level="ERROR"):
             statuses = self.updater(fetcher).upload_statuses()
         self.assertEqual([entry["id"] for entry in statuses[(SHA, "webkitgtk")]], [3])
+
+    def releases_replies(self, gtk_stable_bundle="MiniBrowser_gtk_2.54.1.tar.xz"):
+        wpe = GTK_RELEASES.replace("webkitgtk-", "wpewebkit-")
+        return {"webkitgtk.org/releases/": GTK_RELEASES, "wpewebkit.org/releases/": wpe,
+                "webkitgtk.org/built-products/x86_64/release/stable/MiniBrowser/LAST-IS": gtk_stable_bundle,
+                "webkitgtk.org/built-products/x86_64/release/beta/MiniBrowser/LAST-IS": "MiniBrowser_gtk_2.53.92.tar.xz",
+                "wpewebkit.org/built-products/x86_64/release/stable/MiniBrowser/LAST-IS": "MiniBrowser_wpe_2.54.2.tar.xz",
+                "wpewebkit.org/built-products/x86_64/release/beta/MiniBrowser/LAST-IS": "MiniBrowser_wpe_2.53.92.tar.xz"}
+
+    def test_each_release_channel_says_whether_its_bundle_is_the_newest_release(self):
+        releases = self.updater(FakeFetcher(self.releases_replies())).releases()
+        self.assertEqual({port: {channel: (entry["release"]["version"], entry["bundle"]["version"], entry["state"], entry["stale"])
+                                 for channel, entry in channels.items()} for port, channels in releases.items()},
+                         {"gtk": {"stable": ("2.54.2", "2.54.1", "outdated", False), "beta": ("2.53.92", "2.53.92", "current", False)},
+                          "wpe": {"stable": ("2.54.2", "2.54.2", "current", False), "beta": ("2.53.92", "2.53.92", "current", False)}})
+
+    def test_releases_that_cannot_be_read_keep_the_previous_values_and_say_so(self):
+        cache = {"version": update_dashboard.CACHE_VERSION}
+        self.updater(FakeFetcher(self.releases_replies()), cache).releases()
+        replies = self.releases_replies()
+        del replies["webkitgtk.org/releases/"]
+        replies["webkitgtk.org/built-products/x86_64/release/stable/MiniBrowser/LAST-IS"] = FetchError("HTTP 503", status=503)
+        with self.assertLogs("test_update", level="ERROR") as logged:
+            releases = self.updater(FakeFetcher(replies), cache).releases()
+        gtk_stable = releases["gtk"]["stable"]
+        self.assertEqual((gtk_stable["release"]["version"], gtk_stable["bundle"]["version"], gtk_stable["state"], gtk_stable["stale"]),
+                         ("2.54.2", "2.54.1", "outdated", True))
+        self.assertTrue(releases["gtk"]["beta"]["stale"])
+        self.assertFalse(releases["wpe"]["stable"]["stale"])
+        self.assertEqual(len(logged.records), 2)
+
+    def test_a_new_bundle_is_logged(self):
+        cache = {"version": update_dashboard.CACHE_VERSION}
+        self.updater(FakeFetcher(self.releases_replies()), cache).releases()
+        with self.assertLogs("test_update", level="INFO") as logged:
+            releases = self.updater(FakeFetcher(self.releases_replies("MiniBrowser_gtk_2.54.2.tar.xz")), cache).releases()
+        self.assertEqual(releases["gtk"]["stable"]["state"], "current")
+        self.assertIn("webkitgtk.org: new stable bundle 2.54.2", logged.output[0])
 
     def test_a_shared_commit_uses_one_github_lookup_per_run(self):
         cache = {"version": update_dashboard.CACHE_VERSION}
