@@ -3,7 +3,17 @@
 const DATA_DIR = "data/";
 const DATA_URL = `${DATA_DIR}dashboard.json`;
 const LOG_URL = `${DATA_DIR}cron_helper.log.txt`;
-const REFRESH_MINUTES = 5;
+// The data only changes when the script runs, so the page looks for new data
+// only once an update is due: a minute after it starts, because a run takes
+// about that long, then every minute, and after half an hour, when something
+// is clearly wrong, every 5 minutes. Each check is cheap when nothing changed,
+// because the browser asks the server whether the file changed (HTTP 304).
+const FIRST_CHECK_AFTER_UPDATE_MS = 60000;
+const CHECK_WHILE_DUE_MS = 60000;
+const DUE_FOR_MINUTES = 30;
+const CHECK_WHEN_LATE_MS = 5 * 60000;
+// Normal runs take under a minute, so after this long the update is called late.
+const UPDATE_LATE_AFTER_MINUTES = 5;
 const STEP = 3;
 const INITIAL = { builds: 3, nightly: 4, weekly: 2 };
 const GAP_WARNING_DAYS = 14;
@@ -177,13 +187,19 @@ function sourceLink() {
   return anchor;
 }
 
+// How old the data is and when the next update is due, which change with the
+// clock, so they are redrawn on their own between two loads of the data.
+function generatedParts() {
+  if (!dashboard) return [];
+  const age = Date.now() - new Date(dashboard.generated_at);
+  return [element("span", {}, "Data from ", element("b", {}, formatTime(dashboard.generated_at)), ` (${formatAge(age)} ago${nextUpdateText()})`),
+    lastUpdateBadge(age)];
+}
+
 function header() {
-  const generated = element("div", { class: "freshness" });
+  const generated = element("div", { class: "freshness", id: "generated" }, generatedParts());
   const freshness = element("div", { class: "freshness badges" });
   if (dashboard) {
-    const age = Date.now() - new Date(dashboard.generated_at);
-    generated.append(element("span", {}, "Data from ", element("b", {}, formatTime(dashboard.generated_at)), ` (${formatAge(age)} ago${nextUpdateText()})`));
-    generated.append(lastUpdateBadge(age));
     freshness.append(element("span", { class: "last-runs" }, "Last nightlies:", buildsBadge(), wptRunsBadge(dashboard.daily, "nightly", "#nightly")));
     for (const channel of RELEASE_CHANNELS)
       freshness.append(element("span", { class: "last-runs" }, `Last ${channel}:`, bundlesBadge(channel), wptRunsBadge(dashboard.weekly, channel, "#weekly")));
@@ -191,22 +207,22 @@ function header() {
   return element("header", { class: "app-head" }, element("h1", {}, "WebKit WPT runs (Linux)"), generated, element("div", { class: "head-right" }, sourceLink(), themeButton()), freshness);
 }
 
-// The page only reloads its data every few minutes, so a new update can be on
-// the server for a while before the page shows it; only after this long is
-// an update that has not arrived called late.
-const NEXT_UPDATE_SLACK_MINUTES = REFRESH_MINUTES * 2;
-
 // Cron runs the script at fixed times, every so many minutes from midnight UTC,
 // so the next update is the first of those times after the data was generated,
 // even when the last update was started by hand.
-function nextUpdateText() {
-  const every = dashboard.settings.update_every_minutes;
-  if (!every) return "";
+function nextUpdateTime() {
+  const every = dashboard?.settings?.update_every_minutes;
+  if (!every) return null;
   const period = every * 60000;
-  const next = (Math.floor(new Date(dashboard.generated_at) / period) + 1) * period;
+  return (Math.floor(new Date(dashboard.generated_at) / period) + 1) * period;
+}
+
+function nextUpdateText() {
+  const next = nextUpdateTime();
+  if (next === null) return "";
   const left = next - Date.now();
   if (left >= 60000) return `, next update in ${formatAge(left)}`;
-  if (-left <= NEXT_UPDATE_SLACK_MINUTES * 60000) return ", next update any moment now";
+  if (-left <= UPDATE_LATE_AFTER_MINUTES * 60000) return ", next update any moment now";
   return `, next update ${formatAge(-left)} late`;
 }
 
@@ -895,8 +911,8 @@ function render() {
 
 async function load() {
   const [dashboardResult, logResult] = await Promise.allSettled([
-    fetch(DATA_URL, { cache: "no-store" }).then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); }),
-    fetch(LOG_URL, { cache: "no-store" }).then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.text(); }),
+    fetch(DATA_URL, { cache: "no-cache" }).then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); }),
+    fetch(LOG_URL, { cache: "no-cache" }).then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.text(); }),
   ]);
   if (dashboardResult.status === "fulfilled") {
     dashboard = dashboardResult.value;
@@ -923,6 +939,30 @@ async function load() {
   }
 }
 
+function nextCheckDelay() {
+  const due = nextUpdateTime();
+  if (due === null) return CHECK_WHEN_LATE_MS;
+  const now = Date.now();
+  const first = due + FIRST_CHECK_AFTER_UPDATE_MS;
+  // Capped, so that a wrong time in the data can not stop the checks for long.
+  if (now < first) return Math.min(first - now, dashboard.settings.update_every_minutes * 60000 + FIRST_CHECK_AFTER_UPDATE_MS);
+  return now < due + DUE_FOR_MINUTES * 60000 ? CHECK_WHILE_DUE_MS : CHECK_WHEN_LATE_MS;
+}
+
+let checkTimer = null;
+let nextCheckAt = 0;
+
+async function check() {
+  clearTimeout(checkTimer);
+  await load();
+  const delay = nextCheckDelay();
+  nextCheckAt = Date.now() + delay;
+  checkTimer = setTimeout(check, delay);
+}
+
 render();
-load();
-setInterval(load, REFRESH_MINUTES * 60000);
+check();
+// A computer that sleeps can hold a timer back for hours, so a page that comes back into view checks at once if a check is overdue.
+document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() >= nextCheckAt) check(); });
+// Only this line, because redrawing the whole page would also lose the keyboard focus.
+setInterval(() => document.getElementById("generated")?.replaceChildren(...generatedParts()), 30000);

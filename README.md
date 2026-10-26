@@ -123,8 +123,10 @@ Two things to check:
 - The user the web server runs as must be able to read `html/` and everything
   the script writes in `html/data/`, and reach them, which may need
   `chmod o+x` on the directories above them, such as your home directory.
-- The page reloads its data every 5 minutes and always asks for a fresh copy,
-  so no special caching settings are needed.
+- The page looks for new data when an update is due, asking the server
+  whether the files changed, so the server should send `Last-Modified` or
+  `ETag` headers and answer 304 when nothing changed, which Apache and nginx
+  do for static files by default. No other caching settings are needed.
 
 Only `html/` must be served. The cache and the rotated logs stay out of it on
 purpose, and the token is never written anywhere by the script.

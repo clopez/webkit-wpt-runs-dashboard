@@ -2,8 +2,8 @@
 
 ## The problem
 
-The web-platform-tests (WPT) project runs its whole test suite on Taskcluster for
-`webkitgtk_minibrowser` and `wpewebkit_minibrowser`, in three channels:
+The web-platform-tests (WPT) project runs its whole test suite on Taskcluster
+for `webkitgtk_minibrowser` and `wpewebkit_minibrowser`, in three channels:
 
 - nightly, every day;
 - stable and beta, every week.
@@ -63,10 +63,10 @@ Everything lives in one repository:
 
 ### The script
 
-- It targets Python 3.11, the version on the server (Debian 12, Python
-  3.11.2), and uses only the standard library. The server does have packages
-  like `requests`, but `urllib`, `gzip` and `json` are enough here, and this way
-  the script also runs on any other machine without installing anything.
+- It targets Python 3.11, the version on the server (Debian 12, Python 3.11.2),
+  and uses only the standard library. The server does have packages like
+  `requests`, but `urllib`, `gzip` and `json` are enough here, and this way the
+  script also runs on any other machine without installing anything.
 - It only looks at tags and runs from the last `MAX_AGE_DAYS` days, so it never
   goes back through years of history.
 - It reads the GitHub token from the `GITHUB_TOKEN` environment variable, which
@@ -90,10 +90,10 @@ Everything lives in one repository:
 - A request that fails with a server error (5xx), a rate limit (403 or 429), a
   network error, or a body that is truncated or cannot be decoded, is tried
   again after 10 seconds, and once more after 30 seconds. Reading and decoding
-  the body happen inside these retries, because a connection that drops
-  halfway can still answer 200. If a retry succeeds, the script logs a `WARNING:`; if all three
-  attempts fail, it logs an `ERROR:`. Other client errors, like a 404, are not
-  retried.
+  the body happen inside these retries, because a connection that drops halfway
+  can still answer 200. If a retry succeeds, the script logs a `WARNING:`; if
+  all three attempts fail, it logs an `ERROR:`. Other client errors, like a
+  404, are not retried.
 - No answer is read past 256 MB, compressed or after decompressing it, so
   that whatever a server sends, by mistake or not, the script's memory stays
   bounded. A larger answer is refused, not asked again, and logged as an
@@ -121,11 +121,12 @@ Everything lives in one repository:
   written in full.
 - The log file on the web always holds the last 30 calendar days, today
   included, as a rolling window. A failed rotation, or a line cut in the middle
-  of a character, never stops the update. Each run of the script moves the lines older than that out of
-  `html/data/` into rotated files in `cron_helper/logs/`, one per block of 30
-  days, so they are no longer on the website but stay on the server just in
-  case. A block older than 90 days is deleted. So the server keeps at most 90
-  days of log, and the last 30 are always visible on the page.
+  of a character, never stops the update. Each run of the script moves the
+  lines older than that out of `html/data/` into rotated files in
+  `cron_helper/logs/`, one per block of 30 days, so they are no longer on the
+  website but stay on the server just in case. A block older than 90 days is
+  deleted. So the server keeps at most 90 days of log, and the last 30 are
+  always visible on the page.
 - The unit tests use `unittest` and made-up replies instead of the network, so
   they run anywhere. They cover the diff counting, the state of each cell, the
   retries, the log format and rotation, and how the script combines and caches
@@ -180,15 +181,30 @@ Everything lives in one repository:
 
 ### The page
 
-- It fetches `data/dashboard.json` and the log without using the browser's
-  cached copy, and fetches them again every 5 minutes while the tab stays
-  open, keeping what is open, scrolled or expanded.
+- It fetches `data/dashboard.json` and the log, and while the tab stays open
+  it looks for new data only when an update is due: nothing until a minute
+  after the expected time of the next update (a normal run takes under a
+  minute; on 2026-10-26 the file was written 42 seconds past the hour), then
+  every minute, and after half an hour, when something is clearly wrong,
+  every 5 minutes. Data from an older script that does not say its schedule
+  is looked for every 5 minutes. Each check asks the server whether the files
+  changed (`cache: "no-cache"`), so when nothing changed the server answers
+  304 with no body, instead of the 437 KB of `dashboard.json`; the server of
+  the live dashboard does that for both files. Because a computer that sleeps
+  can hold a timer back, a tab that comes back into view checks at once if a
+  check is overdue. New data is drawn keeping what is open, scrolled or
+  expanded. After an update run by hand, an open page shows it at its next
+  check, or when it is reloaded.
+- The age of the data and the time to the next update are redrawn every 30
+  seconds, on their own, because redrawing the whole page would also lose
+  the keyboard focus.
 - It loads nothing from other servers: no fonts, libraries or analytics, so
   visitors' addresses are not sent anywhere else.
 - Every link built from data goes through one function that only accepts HTTPS
   links to github.com, community-tc.services.mozilla.com, wpt.fyi and
   build.webkit.org, or HTTP(S) links within the dashboard, and shows anything
-  else, `blob:` links included, as plain text. Text from the APIs is always inserted as text, never as HTML.
+  else, `blob:` links included, as plain text. Text from the APIs is always
+  inserted as text, never as HTML.
 - The icon (`favicon.svg`, with PNG copies for browsers and devices that do
   not use SVG icons) is the dashboard in miniature: two columns of rows split
   by a dashed line, each row a bar with a colored stripe, mostly green with one
@@ -234,12 +250,12 @@ token in the environment and the log in `html/data/`:
 ```
 
 The script takes its own lock, so a run that starts while the previous one is
-still going logs that and stops.
-The first run fills the cache with the last `MAX_AGE_DAYS` days, which takes
-about 15 minutes and some 1,100 requests (about 150 of them to GitHub); later
-runs take 15 to 40 seconds and some 30 to 50 requests (about 6 to GitHub), the
-most while a run is in progress. [README.md](README.md) has the full instructions: the token,
-the cron job, the web server, and how to try it locally.
+still going logs that and stops. The first run fills the cache with the last
+`MAX_AGE_DAYS` days, which takes about 15 minutes and some 1,100 requests
+(about 150 of them to GitHub); later runs take 15 to 40 seconds and some 30 to
+50 requests (about 6 to GitHub), the most while a run is in progress.
+[README.md](README.md) has the full instructions: the token, the cron job, the
+web server, and how to try it locally.
 
 The unit tests need no network:
 
@@ -364,9 +380,9 @@ cd cron_helper && python3 -m unittest discover -s tests
    wpt.fyi only starts importing once the whole suite has finished, which
    includes every browser on that commit, not only ours. It also starts again
    each time the suite finishes: wpt.fyi handles every `check_suite` event with
-   action `completed` (`api/taskcluster/webhook.go`), and a suite that a retried
-   task reopened finishes again, so wpt.fyi answers `DUPLICATE` for the runs it
-   already has.
+   action `completed` (`api/taskcluster/webhook.go`), and a suite that a
+   retried task reopened finishes again, so wpt.fyi answers `DUPLICATE` for the
+   runs it already has.
 
    There is one known limitation here. A commit's suite is shared by all its
    pushes, so its `updated_at` and its number of check runs are those of its
@@ -374,11 +390,11 @@ cd cron_helper && python3 -m unittest discover -s tests
    whose weekly tag came a day after its daily one, a nightly run that was not
    uploaded would be judged from the later suite: its 7-hour clock would start
    from the weekly completion, and the reason could name the weekly suite's
-   check runs. It has not happened in 60 days of real data, because every run on
-   such commits was uploaded, and the fix, keeping a snapshot of the suite per
-   row, is not worth it yet.
-6. **Did it reach wpt.fyi**: one request per product and channel lists all
-   its runs of the last `MAX_AGE_DAYS` days,
+   check runs. It has not happened in 60 days of real data, because every run
+   on such commits was uploaded, and the fix, keeping a snapshot of the suite
+   per row, is not worth it yet.
+6. **Did it reach wpt.fyi**: one request per product and channel lists all its
+   runs of the last `MAX_AGE_DAYS` days,
    `GET https://wpt.fyi/api/runs?product=webkitgtk&label=<channel>&label=master&from=<date>&max-count=500`,
    and a commit's run is found in that list by its `full_revision_hash`.
    - Use `webkitgtk` or `wpewebkit` here. The product names with
@@ -491,11 +507,12 @@ hours after the suite finished.
 When a run is not uploaded, the cell tries to explain why:
 
 - if the suite has more check runs than wpt.fyi can list, it points to the
-  known wpt.fyi bug. That limit is 500 today, and it is a single constant in the
-  script (`check_run_limit` in `states.Settings`), so it can be changed when
-  wpt.fyi deploys a fix. However, the reason is worked out again on every run,
-  so after that change the older runs that did hit the limit would say "cause
-  unknown" instead; keeping the limit that applied on each date would fix that;
+  known wpt.fyi bug. That limit is 500 today, and it is a single constant in
+  the script (`check_run_limit` in `states.Settings`), so it can be changed
+  when wpt.fyi deploys a fix. However, the reason is worked out again on every
+  run, so after that change the older runs that did hit the limit would say
+  "cause unknown" instead; keeping the limit that applied on each date would
+  fix that;
 - if the saved `/api/status` entries have one for the run that wpt.fyi did not
   accept, it shows the stage and the error of the latest one. A `VALID` entry
   is not shown as a reason, since it means the upload was accepted. These
@@ -523,15 +540,15 @@ Every cell that is not green also links to two pages about its whole run:
 
 - its task group on Taskcluster, filtered to the port, for example
   `https://community-tc.services.mozilla.com/tasks/groups/<task group id>#webkitgtk`;
-- the checks of its commit on GitHub, filtered to the Community-TC check
-  suite, for example
+- the checks of its commit on GitHub, filtered to the Community-TC check suite,
+  for example
   `https://github.com/web-platform-tests/wpt/commit/<sha>/checks?check_suite_id=<suite id>`.
   These are GitHub checks, not GitHub Actions, because Taskcluster reports to
   GitHub through the "Community-TC Integration" app. The link says "All GitHub
-  checks of this commit" because that page shows every browser and channel
-  that ran on the commit. For example on a Monday the daily and the weekly tag
-  share a commit, so the page of a nightly cell also lists the failures of
-  stable and beta.
+  checks of this commit" because that page shows every browser and channel that
+  ran on the commit. For example on a Monday the daily and the weekly tag share
+  a commit, so the page of a nightly cell also lists the failures of stable and
+  beta.
 
 A task that failed and passed when retried counts as passed, and the cell shows
 a small note with the number of chunks that passed after a retry. Taskcluster
@@ -602,8 +619,8 @@ because the file crashed) only in its "total" number, not as a failure.
 - **Only the tests that exist in both runs are compared.** Tests added to or
   removed from WPT between the two runs are only counted, as "not compared".
 - **A test passes** when its file ends with status OK or PASS and every subtest
-  in it passes. A file that ends in ERROR after reporting 5 passing subtests out
-  of 5 does not pass, because the rest of the file never ran.
+  in it passes. A file that ends in ERROR after reporting 5 passing subtests
+  out of 5 does not pass, because the rest of the file never ran.
 - **tests +N / −N**: tests that started or stopped passing.
 - **subtests +N / −N**: the change in passing subtests inside those same tests.
   The subtests that a crashed or timed-out file no longer reports count in the
@@ -650,11 +667,12 @@ because the file crashed) only in its "total" number, not as a failure.
   writes it to `html/data/diffs/<previous run id>-<run id>.json`, and the page
   loads it when the button is pressed. `dashboard.json` only carries the
   totals and the five directories shown in the cell.
-- It also shows the WebKit version of the previous run. When both runs used
-  the same build, it says so, because then every change comes from WPT or from
+- It also shows the WebKit version of the previous run. When both runs used the
+  same build, it says so, because then every change comes from WPT or from
   flaky tests: for nightly runs the cell says "Same bundle as the run of …",
-  and the expanded diff says so for every channel. In the pair measured with the same build (webkitgtk nightly,
-  09-24 to 09-25), about a hundred tests still changed in each direction.
+  and the expanded diff says so for every channel. In the pair measured with
+  the same build (webkitgtk nightly, 09-24 to 09-25), about a hundred tests
+  still changed in each direction.
 - **Links**: the run (`https://wpt.fyi/results/?run_id=<id>`), the previous
   run, and the full diff on wpt.fyi
   (`https://wpt.fyi/results/?diff&filter=ADC&run_id=<prev>&run_id=<this>`).
@@ -714,14 +732,14 @@ because in all those cases no bundle was uploaded.
 
 A finished build never changes, so the script keeps each one in its cache, with
 its failed steps, and never asks for it again. The cache also records when a
-bot's history has been read in full: until then, for example after a first
-read that failed halfway, the script asks for the whole window again, and it
-does the same when the newest builds no longer overlap the cached ones. That
-record is cleared before such a backfill starts and set again only when it
-succeeds, so a backfill that fails halfway is done again on the next run. Each run of the script only
-makes the one request per bot for the latest builds, plus one request for the
-steps of each newly failed build. Builds that started more than `MAX_AGE_DAYS`
-ago are dropped.
+bot's history has been read in full: until then, for example after a first read
+that failed halfway, the script asks for the whole window again, and it does
+the same when the newest builds no longer overlap the cached ones. That record
+is cleared before such a backfill starts and set again only when it succeeds,
+so a backfill that fails halfway is done again on the next run. Each run of the
+script only makes the one request per bot for the latest builds, plus one
+request for the steps of each newly failed build. Builds that started more than
+`MAX_AGE_DAYS` ago are dropped.
 
 ### How it is shown
 
@@ -819,19 +837,17 @@ The page is split in two columns: WPE WebKit on the left and WebKitGTK on the
 right. From top to bottom:
 
 1. **Header**, across both columns, in two lines:
-   - the first line is about the dashboard's own data: the title, when the
-     data was generated and when the next update is expected, and the "Last
-     update" badge, which links to the log. The script cannot read cron's
-     schedule, so `UPDATE_EVERY_MINUTES` in the script says it, and has to
-     match the cron line; the next update is the next multiple of it from
-     midnight UTC, which is when cron runs such a line, even after an update
-     started by hand. Because the page reloads its data every 5 minutes, it
-     says "any moment now" for 10 minutes after that time before it calls the
-     update late. It reads, for example, "Data from 2026-10-26 18:18 UTC (29
-     minutes ago, next update in 13 minutes)".
-     It shows the errors and warnings of the script's last run, or turns red
-     when the data is more than 3 hours old. The theme button sits at its
-     right end;
+   - the first line is about the dashboard's own data: the title, when the data
+     was generated and when the next update is expected, and the "Last update"
+     badge, which links to the log. The script cannot read cron's schedule, so
+     `UPDATE_EVERY_MINUTES` in the script says it, and has to match the cron
+     line; the next update is the next multiple of it from midnight UTC, which
+     is when cron runs such a line, even after an update started by hand. It
+     says "any moment now" from a minute before that time until 5 minutes after
+     it, and after that it calls the update late. It reads, for example, "Data
+     from 2026-10-26 18:18 UTC (29 minutes ago, next update in 13 minutes)". It
+     shows the errors and warnings of the script's last run, or turns red when
+     the data is more than 3 hours old. The theme button sits at its right end;
    - the second line is about the runs, with badges that each take the
      latest build or run whose outcome is known, leaving out the ones still in
      progress:
@@ -986,22 +1002,21 @@ Most of the data never changes once a run is over, so the script keeps it in
 
 - **commits**: the suite, decision tasks, chunks and tags of each commit, and
   the version each run tested, with the chunk it was read from, so that the
-  same log is never read twice. A
-  commit is final, and never fetched again, once none of its chunks is running
-  and all its decision tasks have finished, and either its suite finished more
-  than 24 hours ago and its newest tag or decision task is more than 24 hours
-  old, or its newest tag or decision task is more than 72 hours old, because
-  Taskcluster ends every task within a day. Until then it is fetched again on
-  every run, but only once per run, even when a daily and a weekly tag share
-  it, and it is judged with all its tags. A decision task counts as finished when GitHub says so, or once
-  it started more than 24 hours ago, because Taskcluster ends every task
-  within its deadline; otherwise a check that GitHub left in progress by
-  mistake would keep the commit waiting for 60 days. A new tag on a final
-  commit makes it fetched again, because a
-  weekly tag can land on a commit that had a daily tag days before and start
-  its stable and beta tasks on it. However, a push retriggered by hand after a
-  commit became final is not noticed, because nothing the script reads says
-  so; the commit keeps the state it had;
+  same log is never read twice. A commit is final, and never fetched again,
+  once none of its chunks is running and all its decision tasks have finished,
+  and either its suite finished more than 24 hours ago and its newest tag or
+  decision task is more than 24 hours old, or its newest tag or decision task
+  is more than 72 hours old, because Taskcluster ends every task within a day.
+  Until then it is fetched again on every run, but only once per run, even when
+  a daily and a weekly tag share it, and it is judged with all its tags. A
+  decision task counts as finished when GitHub says so, or once it started more
+  than 24 hours ago, because Taskcluster ends every task within its deadline;
+  otherwise a check that GitHub left in progress by mistake would keep the
+  commit waiting for 60 days. A new tag on a final commit makes it fetched
+  again, because a weekly tag can land on a commit that had a daily tag days
+  before and start its stable and beta tasks on it. However, a push retriggered
+  by hand after a commit became final is not noticed, because nothing the
+  script reads says so; the commit keeps the state it had;
 - **tags**: the tags of each month, final once the month is over;
 - **the GitHub check of each failed chunk**, kept with its commit;
 - **builds**: every finished build, with its failed steps, and whether each
@@ -1031,8 +1046,8 @@ wpt.fyi's Taskcluster webhook lists the check runs of the finished check suite
 CheckRuns returned for CheckSuite", so nothing from that suite is imported
 (`api/taskcluster/webhook.go`, `ListCheckRuns`).
 
-Since WPT commit `ac3c70021a6` (2026-04-15) added test262 chunks to Taskcluster,
-every commit with a weekly tag has more than 500 check runs. So:
+Since WPT commit `ac3c70021a6` (2026-04-15) added test262 chunks to
+Taskcluster, every commit with a weekly tag has more than 500 check runs. So:
 
 - stable and beta have not reached wpt.fyi since 2026-04-13 (the 04-13 suite
   had 454 check runs; the 04-20 suite had 590);
@@ -1061,7 +1076,9 @@ The settings are constants at the top of the files:
   and `check_run_limit` 500;
 - `fetch.py`: 3 attempts, 10 and 30 seconds between them, 90-second timeout;
 - `logs.py`: 30 days on the web, 90 days in total;
-- `dashboard.js`: reload every 5 minutes, 3, 4 and 2 rows at first, 3 more per
+- `dashboard.js`: the first check for new data a minute after an update is
+  due, then every minute for 30 minutes, then every 5 minutes; an update
+  called late 5 minutes after it was due; 3, 4 and 2 rows at first, 3 more per
   click, the warning above 14 days between runs, and 08:00 UTC as the hour
   after which today's daily tag should exist.
 
