@@ -85,6 +85,24 @@ def task_log_url(task_id, run_id):
     return f"{TASKCLUSTER_ROOT}/api/queue/v1/task/{task_id}/runs/{run_id}/artifacts/public/logs/live_backing.log"
 
 
+# WPT's own line when a chunk has installed the browser, for example
+# "MiniBrowser bundle for channel nightly installed: WebKitGTK 2.55.0 (320483@main)",
+# whose version is written like wpt.fyi's browser_version.
+INSTALLED_BUNDLE = re.compile(r"MiniBrowser bundle for channel \S+ installed: .*?(\d+\.\d+\.\d+(?: \([^()\s]+\))?)[ \t]*$", re.M)
+# The line comes in the first few kilobytes of the log, and 64 KB of the
+# compressed log are several hundred kilobytes of text.
+LOG_START_BYTES = 65536
+
+
+def chunk_version(fetcher, task_id, run_id):
+    """The browser version that a chunk installed, read from the start of its
+    log, or None when the chunk stopped before installing it."""
+    text = fetcher.get_bytes(task_log_url(task_id, run_id), "taskcluster", decode=lambda body: body.decode("utf-8", "replace"),
+                             first_bytes=LOG_START_BYTES)
+    match = INSTALLED_BUNDLE.search(text)
+    return match[1] if match else None
+
+
 def wptfyi_runs(fetcher, product, channel, since):
     query = urllib.parse.urlencode([("product", product), ("label", channel), ("label", "master"),
                                     ("from", f"{since.isoformat()}T00:00:00Z"), ("max-count", 500)])

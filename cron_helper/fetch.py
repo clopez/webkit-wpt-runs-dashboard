@@ -52,19 +52,23 @@ class Fetcher:
     def get_json(self, url, service):
         return self.get_bytes(url, service, decode=json.loads)
 
-    def get_bytes(self, url, service, decode=lambda body: body):
+    def get_bytes(self, url, service, decode=lambda body: body, first_bytes=None):
         """Reading and decoding happen inside the retries, because a
         connection that drops halfway can still answer 200 with a truncated
-        body."""
+        body. With first_bytes, only the start of the file is read."""
         if urllib.parse.urlparse(url).scheme != "https":
             raise FetchError(f"{url}: only https addresses are fetched")
-        request = urllib.request.Request(url, headers=self._headers(url))
+        headers = self._headers(url)
+        if first_bytes:
+            headers["Range"] = f"bytes=0-{first_bytes - 1}"
+        request = urllib.request.Request(url, headers=headers)
         last_error = None
         for attempt in range(1, self.attempts + 1):
             self.request_counts[service] += 1
             try:
                 with self.opener(request, timeout=self.timeout) as response:
-                    body = response.read()
+                    # A server that ignores the range sends everything, which can be megabytes of log.
+                    body = response.read(first_bytes) if first_bytes else response.read()
                     content_encoding = response.headers.get("Content-Encoding", "")
             except urllib.error.HTTPError as error:
                 last_error = f"HTTP {error.code} {error.reason}"
@@ -81,7 +85,8 @@ class Fetcher:
             else:
                 try:
                     if content_encoding == "gzip" or body[:2] == b"\x1f\x8b":
-                        body = gzip.decompress(body)
+                        # The start of a compressed file lacks its end, which gzip.decompress refuses but a stream decompressor accepts.
+                        body = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(body) if first_bytes else gzip.decompress(body)
                     decoded = decode(body)
                 except (EOFError, gzip.BadGzipFile, zlib.error, ValueError) as error:
                     last_error = f"{type(error).__name__}: {error}"

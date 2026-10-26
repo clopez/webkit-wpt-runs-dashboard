@@ -60,11 +60,18 @@ TAG_NAME = re.compile(r"^epochs/(daily|weekly)/\d{4}-\d{2}-\d{2}_\d{2}H$")
 # a check yet is looked up again, but only on this many runs of the script.
 CHECK_RUN_LOOKUPS = 8
 BUILD_FETCH = 10
+# A chunk that stopped before installing the browser has no version in its
+# log, so the next one is tried, but no more than this many per run.
+VERSION_CANDIDATES = 3
+# A log that cannot be read keeps its commit open so that the next run tries
+# again, but only on this many runs, so that a log that stays broken does not
+# keep the commit open for the whole window.
+VERSION_READS = 8
 SETTINGS = states.Settings()
 # An answer that parses but lacks the fields the script reads is as unusable as
 # a failed request, so it gets the same fallback instead of stopping the run.
 REQUEST_ERRORS = (FetchError, KeyError, TypeError, ValueError)
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 # A run that stops because of an unexpected error is tried again right away,
 # first with the same cache, in case the error was random, and then with an
 # empty one, in case the cache itself is what makes it fail.
@@ -322,7 +329,10 @@ class Updater:
             expected_by_suite = states.expected_suites([chunk for selected in by_port.values() for chunk in selected])
             for browser, selected in by_port.items():
                 if selected or expected_by_suite:
-                    summaries[f"{browser}-{channel}"] = states.summarize_chunks(selected, expected_by_suite)
+                    key = f"{browser}-{channel}"
+                    summaries[key] = states.summarize_chunks(selected, expected_by_suite)
+                    previous = cached["chunks"].get(key, {}) if cached else {}
+                    summaries[key].update(self.run_version(tag, selected, previous))
         tags = sorted(set(cached["tags"] if cached else []) | tag_names)
         # A retriggered push starts a new decision task on the same commit, so its start counts as new activity too.
         newest_activity = max([tag_time(name) for name in tags] + [states.time_key(decision["started_at"]) for decision in decisions])
@@ -340,7 +350,8 @@ class Updater:
             "scheduling": not decisions_finished,
             "fetched_at": iso(self.now),
             "tags": tags,
-            "final": bool(quiet and decisions_finished and not any(summary["unfinished"] for summary in summaries.values())),
+            # A version that could not be read is not final either, so that the next run reads it.
+            "final": bool(quiet and decisions_finished and not any(summary["unfinished"] or summary["version_read_failed"] for summary in summaries.values())),
         }
         if cached:
             known_lookups = {failed["task_id"]: failed for summary in cached["chunks"].values() for failed in summary["failed"]}
@@ -353,6 +364,32 @@ class Updater:
         self.add_check_run_links(tag, commit_data)
         self.cache["commits"][sha] = commit_data
         return commit_data, False
+
+    def run_version(self, tag, chunks, previous):
+        """The browser version that a run tested, from the log of its chunk
+        that started first among the ones that finished. Only a finished
+        chunk has its whole log stored. Every chunk of a run normally tests
+        the same bundle, so one log is enough; a run whose chunks did not
+        is rejected by wpt.fyi, which says so in its error."""
+        finished = sorted((chunk for chunk in chunks if chunk["runs"] and chunk["runs"][-1]["started"] and chunk["runs"][-1]["resolved"]),
+                          key=lambda chunk: states.time_key(chunk["runs"][-1]["started"]))
+        read_failed = False
+        for chunk in finished[:VERSION_CANDIDATES]:
+            run_id = chunk["runs"][-1]["run_id"]
+            source = f"{chunk['task_id']}/{run_id}"
+            # A finished run's log never changes, so a version read before is not read again.
+            if source == previous.get("version_source"):
+                return {"version": previous["version"], "version_source": source, "version_read_failed": False, "version_failures": 0}
+            try:
+                version = sources.chunk_version(self.fetcher, chunk["task_id"], run_id)
+            except REQUEST_ERRORS as error:
+                self.logger.warning(f"{tag['name']}: could not read the log of {chunk['name']}: {error}; trying again next time")
+                read_failed = True
+                continue
+            if version:
+                return {"version": version, "version_source": source, "version_read_failed": False, "version_failures": 0}
+        failures = previous.get("version_failures", 0) + read_failed
+        return {"version": None, "version_source": None, "version_read_failed": read_failed and failures < VERSION_READS, "version_failures": failures}
 
     def add_check_run_links(self, tag, commit_data):
         for summary in commit_data["chunks"].values():

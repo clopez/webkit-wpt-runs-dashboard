@@ -89,6 +89,13 @@ class FetcherTest(unittest.TestCase):
         self.assertNotIn("ghp_FAKE0123456789", str(raised.exception))
         self.assertEqual(fetcher.request_counts["github"], 1)
 
+    def test_the_start_of_a_compressed_file_is_read_with_a_range(self):
+        log = "".join(f"line {number}\n" for number in range(20000)).encode()
+        opener = FakeOpener(FakeResponse(gzip.compress(log)[:4096], {"Content-Encoding": "gzip"}))
+        text = self.fetcher(opener).get_bytes("https://community-tc.example/log", "taskcluster", decode=bytes.decode, first_bytes=4096)
+        self.assertEqual(opener.requests[0].get_header("Range"), "bytes=0-4095")
+        self.assertTrue(text.startswith("line 0\nline 1\n"))
+
     def test_decompresses_gzip(self):
         opener = FakeOpener(FakeResponse(gzip.compress(b'{"a": 1}'), {"Content-Encoding": "gzip"}))
         self.assertEqual(self.fetcher(opener).get_json("https://storage.googleapis.com/x.json.gz", "wptfyi"), {"a": 1})

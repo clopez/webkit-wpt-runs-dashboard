@@ -302,6 +302,29 @@ cd cron_helper && python3 -m unittest discover -s tests
    dashboard does not read the reports of the tasks
    (`public/results/wpt_report.json.gz`), because wpt.fyi's summary files
    already have what the diff needs.
+   - The same log gives **the version a run tested**, which a run that did
+     not reach wpt.fyi has no other source for. When a chunk has installed the
+     browser, WPT writes a line like `MiniBrowser bundle for channel nightly
+     installed: WebKitGTK 2.55.0 (320483@main)`, with the version written as
+     in wpt.fyi's `browser_version`, so green and red cells show it the same
+     way. For the 11 runs on wpt.fyi that were checked, the two were
+     identical.
+   - The script reads the log of one chunk per run: the one that started
+     first among the chunks that have finished, because only a finished
+     chunk has its whole log stored. It only reads the start of the log, the
+     first 64 KB of the compressed file, with a `Range` request, because the
+     line comes in its first few kilobytes and a whole log can be 14 MB.
+   - All the chunks of a run normally test the same bundle. When a new bundle
+     is published in the middle of a run, the later chunks test it, and
+     wpt.fyi rejects the run with an error that names both versions, which the
+     cell then shows.
+   - A chunk that stopped before installing the browser, such as one whose
+     download failed, has no such line, so the script tries the next one, up
+     to 3. A log that lacks the line or has an unexpected format gives no
+     version and no error, and the cell says "version unknown". A log that
+     cannot be downloaded is logged as a warning, and keeps the commit open
+     so that the next run tries again, but only on 8 runs, so that a log that
+     stays broken does not keep its commit open for the whole window.
 5. **Check suite status**:
    `GET /repos/web-platform-tests/wpt/commits/<sha>/check-suites?app_id=40788`,
    40788 being the "Community-TC Integration" app. The suite gives `status`,
@@ -752,8 +775,8 @@ right. From top to bottom:
    speaks for both ports when both have a known result: when one of them has
    none yet, it names it, for example "WPE WPT run uploaded, GTK unknown", in
    grey, or in red if the other one failed. Hovering a
-   badge shows which build or run it is about, and clicking it goes to that
-   section.
+   badge shows which build or run it is about, with the version each WPT run
+   tested, and clicking it goes to that section.
 2. **Nightly bundles**, in each column: the builds of that port's packaging
    bot on build.webkit.org. This block has a tinted background and a
    frame of its own, so it reads as clearly separate from the WPT runs below
@@ -774,6 +797,12 @@ Each box shows its state in three ways at once: a wide stripe on its left in
 green, yellow, red or grey, a light tint of the same color, and a symbol before
 its headline (✓, ◔, ✕ or –). So a failed run stands out in both themes, and the
 state can be read without relying on color alone.
+
+Every WPT box also shows at its top the version that the run tested. In a
+green box the version is the headline, from wpt.fyi. In the others it sits
+next to the headline, read from the log of the run's first chunk (see "Data
+flow for each tag"), and says "version unknown" until a chunk has finished,
+or when no log says it.
 
 On a narrow screen both ports stay side by side, with the date above each row.
 Each day is one element of its own, so moving its date above its two cells
@@ -826,6 +855,8 @@ cannot shift the cells of the other days.
                        "failed": [], "missing": [], "first_started": "…", "last_resolved": "…",
                        "run_seconds": 33120, "timed_chunks": 33,
                        "slowest": {"name": "…", "task_id": "…", "seconds": 3483, "task_url": "…"},
+                       "version": "2.55.0 (321964@main)", "version_source": "<taskId>/<runId>",
+                       "version_read_failed": false, "version_failures": 0,
                        "task_group_id": "…", "task_group_url": "…"},
             "wptfyi": {
               "run_id": 5193370485129216, "time_start": "…", "created_at": "…",
@@ -877,7 +908,9 @@ The file of an expanded diff, `diffs/<previous run id>-<run id>.json`, has the
 Most of the data never changes once a run is over, so the script keeps it in
 `cron_helper/cache/cache.json` and only asks again for what is still moving:
 
-- **commits**: the suite, decision tasks, chunks and tags of each commit. A
+- **commits**: the suite, decision tasks, chunks and tags of each commit, and
+  the version each run tested, with the chunk it was read from, so that the
+  same log is never read twice. A
   commit is final, and never fetched again, once none of its chunks is running
   and all its decision tasks have finished, and either its suite finished more
   than 24 hours ago and its newest tag or decision task is more than 24 hours

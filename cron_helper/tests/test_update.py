@@ -35,7 +35,7 @@ class FakeFetcher:
                 return reply
         raise FetchError(f"{url}: no reply in the test", status=404)
 
-    def get_bytes(self, url, service, decode=lambda body: body):
+    def get_bytes(self, url, service, decode=lambda body: body, first_bytes=None):
         reply = self.get_json(url, service)
         return decode(reply.encode() if isinstance(reply, str) else reply)
 
@@ -307,6 +307,63 @@ class UpdaterTest(unittest.TestCase):
             releases = self.updater(FakeFetcher(self.releases_replies("MiniBrowser_gtk_2.54.2.tar.xz")), cache).releases()
         self.assertEqual(releases["gtk"]["stable"]["state"], "current")
         self.assertIn("webkitgtk.org: new stable bundle 2.54.2", logged.output[0])
+
+    def version_replies(self, logs):
+        """A nightly run of three GTK chunks that started at 05:10, 05:20 and
+        05:30, and the start of each one's log."""
+        def chunk(number, started):
+            entry = chunk_entry("webkitgtk_minibrowser", "reftest", number, 3)
+            entry["status"]["runs"][0]["started"] = started
+            return entry
+        replies = self.replies()
+        replies["task-group/group1/list"] = {"tasks": [chunk(2, "2026-09-27T05:20:00Z"), chunk(1, "2026-09-27T05:10:00Z"), chunk(3, "2026-09-27T05:30:00Z")]}
+        for number, log in logs.items():
+            replies[f"task/webkitgtk_minibrowser-reftest-{number}/runs/0/artifacts/public/logs/live_backing.log"] = log
+        return replies
+
+    def installed(self, version):
+        return f" 0:00.11 INFO Installing browser\n 0:33.54 INFO WebKitGTK MiniBrowser bundle for channel nightly installed: WebKitGTK {version}\n"
+
+    def test_the_version_of_a_run_comes_from_the_chunk_that_started_first(self):
+        fetcher = FakeFetcher(self.version_replies({1: self.installed("2.55.0 (322241@main)"), 2: self.installed("2.55.0 (322356@main)")}))
+        commit_data, _ = self.updater(fetcher).commit(TAG)
+        self.assertEqual(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"], "2.55.0 (322241@main)")
+        self.assertEqual(sum("live_backing.log" in url for url in fetcher.urls), 1)
+
+    def test_a_chunk_that_stopped_before_installing_the_browser_is_skipped(self):
+        fetcher = FakeFetcher(self.version_replies({1: "urllib.error.HTTPError: HTTP Error 503: Service Unavailable\n", 2: self.installed("2.54.1")}))
+        commit_data, _ = self.updater(fetcher).commit(TAG)
+        self.assertEqual(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"], "2.54.1")
+
+    def test_a_version_read_before_is_not_read_again(self):
+        cache = {"version": update_dashboard.CACHE_VERSION}
+        self.updater(FakeFetcher(self.version_replies({1: self.installed("2.55.0 (322241@main)")})), cache).commit(TAG)
+        fetcher = FakeFetcher(self.version_replies({}))
+        commit_data, _ = self.updater(fetcher, cache).commit(TAG)
+        self.assertEqual(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"], "2.55.0 (322241@main)")
+        self.assertFalse(any("live_backing.log" in url for url in fetcher.urls))
+
+    def test_a_log_that_cannot_be_read_keeps_the_commit_open(self):
+        replies = self.version_replies({number: FetchError("HTTP 503", status=503) for number in (1, 2, 3)})
+        with self.assertLogs("test_update", level="WARNING"):
+            commit_data, _ = self.updater(FakeFetcher(replies)).commit(TAG)
+        self.assertIsNone(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"])
+        self.assertFalse(commit_data["final"])
+
+    def test_a_log_with_an_unexpected_format_gives_no_version_and_no_error(self):
+        garbage = "\x00\x01 MiniBrowser bundle for channel nightly installed: something else entirely\n" + "x" * 5000
+        fetcher = FakeFetcher(self.version_replies({1: garbage, 2: b"\xff\xfe\x00not text", 3: ""}))
+        commit_data, _ = self.updater(fetcher).commit(TAG)
+        self.assertIsNone(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"])
+        self.assertTrue(commit_data["final"])
+
+    def test_a_log_that_stays_unreadable_stops_keeping_the_commit_open(self):
+        cache = {"version": update_dashboard.CACHE_VERSION}
+        replies = self.version_replies({number: FetchError("HTTP 503", status=503) for number in (1, 2, 3)})
+        with self.assertLogs("test_update", level="WARNING"):
+            for _ in range(update_dashboard.VERSION_READS):
+                commit_data, _ = self.updater(FakeFetcher(replies), cache).commit(TAG)
+        self.assertTrue(commit_data["final"])
 
     def test_a_shared_commit_uses_one_github_lookup_per_run(self):
         cache = {"version": update_dashboard.CACHE_VERSION}

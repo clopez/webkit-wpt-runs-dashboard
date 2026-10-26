@@ -247,11 +247,16 @@ function wptRunsBadge(rows, channel, href, noun = "WPT run") {
     return { port, row, cell: row?.cells[port.key][channel] };
   });
   const title = results.map(({ port, row, cell }) => row
-    ? `${port.label}: ${channel} of ${row.date}, ${DECIDED_WPT_STATES[cell.state]}`
+    ? `${port.label}: ${channel} of ${row.date}, ${testedVersion(cell) || "version not known"}, ${DECIDED_WPT_STATES[cell.state]}`
     : `${port.label}: no finished ${channel} run`).join("\n");
   const outcomes = results.map(({ port, cell }) => ({ port,
     word: !cell ? "unknown" : cell.state === "uploaded" ? "uploaded" : cell.state === "not_uploaded" ? "not uploaded" : "failed" }));
   return outcomeBadge(href, outcomes, { noun, passing: "uploaded", nothingKnown: "no WPT runs", title });
+}
+
+// From wpt.fyi when the run reached it, and otherwise from the log of its first chunk.
+function testedVersion(cell) {
+  return cell.wptfyi?.browser_version || cell.chunks?.version || null;
 }
 
 // Show more
@@ -344,7 +349,8 @@ function lastWptRunText(port, channel) {
   const row = dashboard.weekly.find(candidate => DECIDED_WPT_STATES[candidate.cells[port.key]?.[channel]?.state]);
   if (!row) return "No finished WPT run yet";
   const cell = row.cells[port.key][channel];
-  return `Last WPT run, ${shortDate(row.date)}: ${cell.state === "uploaded" ? `on wpt.fyi, tested ${cell.wptfyi.browser_version}` : DECIDED_WPT_STATES[cell.state]}`;
+  const version = testedVersion(cell);
+  return `Last WPT run, ${shortDate(row.date)}: ${DECIDED_WPT_STATES[cell.state]}${version ? `, tested ${version}` : ""}`;
 }
 
 function releaseNode(port, channel) {
@@ -493,6 +499,9 @@ function stateCell(portKey, cell, row, channelLabel) {
       top.append(element("span", { class: "headline" }, "No run"));
       details.push("No tasks for this browser on this commit");
   }
+  // Only a finished chunk's log says the version, and a log can lack it, so a run with chunks may still have none.
+  if (chunks.total) top.append(element("span", { class: "rev", title: chunks.version ? "The version that the first chunk to start installed"
+    : "No finished chunk has said in its log which version it installed" }, chunks.version || "version unknown"));
   if (channelLabel) top.append(element("span", { class: "channel" }, channelLabel));
   const group = taskGroupLink(chunks) || (row.task_groups?.length
     ? link(`${TASKCLUSTER_ROOT}/tasks/groups/${row.task_groups[row.task_groups.length - 1]}#${portByKey(portKey).product}`, "Taskcluster tasks") : null);
