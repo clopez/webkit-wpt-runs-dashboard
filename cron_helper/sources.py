@@ -59,18 +59,31 @@ def check_run_url(fetcher, sha, name, task_id):
     return url if isinstance(url, str) and url.startswith(GITHUB_CHECK_RUN_PAGE) else None
 
 
-def task_group(fetcher, task_group_id):
-    tasks = []
+# Each task of a listing carries its push's whole GitHub event, up to 570 KB,
+# so a listing is read in pages of this many tasks (about 28 MB), and each page
+# is reduced to what the script keeps before the next one is read.
+TASK_GROUP_PAGE = 50
+
+
+def task_group(fetcher, task_group_id, keep=lambda task: task):
+    """The pages are cut by position in the order of the task IDs, so a task
+    added to the group between two pages shifts the later ones and repeats
+    one task at the top of the next page; it is read only once."""
+    kept = []
+    read = set()
     continuation = None
     while True:
-        query = {"limit": 1000}
+        query = {"limit": TASK_GROUP_PAGE}
         if continuation:
             query["continuationToken"] = continuation
         page = fetcher.get_json(f"{TASKCLUSTER_ROOT}/api/queue/v1/task-group/{task_group_id}/list?{urllib.parse.urlencode(query)}", "taskcluster")
-        tasks.extend(page["tasks"])
+        for task in page["tasks"]:
+            if task["status"]["taskId"] not in read:
+                read.add(task["status"]["taskId"])
+                kept.append(keep(task))
         continuation = page.get("continuationToken")
         if not continuation:
-            return tasks
+            return kept
 
 
 def task_url(task_id):

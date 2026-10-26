@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 
-from fetch import Fetcher, FetchError, TokenSafeRedirectHandler
+from fetch import AnswerTooLarge, Fetcher, FetchError, TokenSafeRedirectHandler
 
 
 class FakeResponse(io.BytesIO):
@@ -95,6 +95,35 @@ class FetcherTest(unittest.TestCase):
         text = self.fetcher(opener).get_bytes("https://community-tc.example/log", "taskcluster", decode=bytes.decode, first_bytes=4096)
         self.assertEqual(opener.requests[0].get_header("Range"), "bytes=0-4095")
         self.assertTrue(text.startswith("line 0\nline 1\n"))
+
+    def limited(self, opener, limit=1000):
+        return Fetcher(logging.getLogger("test_fetch"), "secret-token", sleep=lambda seconds: None, opener=opener, max_answer_bytes=limit)
+
+    def test_an_answer_over_the_limit_is_refused_and_not_asked_again(self):
+        opener = FakeOpener(FakeResponse(b"[" + b"1," * 600 + b"1]"))
+        with self.assertRaisesRegex(AnswerTooLarge, "larger than"):
+            self.limited(opener).get_json("https://wpt.fyi/api/runs", "wptfyi")
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_a_small_compressed_answer_that_expands_over_the_limit_is_refused(self):
+        bomb = gzip.compress(b" " * 100_000)
+        self.assertLess(len(bomb), 1000)
+        opener = FakeOpener(FakeResponse(bomb, {"Content-Encoding": "gzip"}))
+        with self.assertRaises(AnswerTooLarge):
+            self.limited(opener).get_json("https://wpt.fyi/api/runs", "wptfyi")
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_an_answer_at_the_limit_is_read(self):
+        body = b"[" + b"1," * 498 + b"1]"
+        self.assertEqual(len(body), 999)
+        self.assertEqual(len(self.limited(FakeOpener(FakeResponse(gzip.compress(body), {"Content-Encoding": "gzip"}))).get_json("https://wpt.fyi/x", "wptfyi")), 499)
+
+    def test_a_whole_compressed_answer_cut_short_is_asked_again(self):
+        cut = gzip.compress(b'{"a": 1}')[:-8]
+        opener = FakeOpener(FakeResponse(cut, {"Content-Encoding": "gzip"}), FakeResponse(gzip.compress(b'{"a": 1}'), {"Content-Encoding": "gzip"}))
+        with self.assertLogs("test_fetch", level="WARNING") as captured:
+            self.assertEqual(self.fetcher(opener).get_json("https://wpt.fyi/x", "wptfyi"), {"a": 1})
+        self.assertIn("ends too early", captured.output[0])
 
     def test_decompresses_gzip(self):
         opener = FakeOpener(FakeResponse(gzip.compress(b'{"a": 1}'), {"Content-Encoding": "gzip"}))

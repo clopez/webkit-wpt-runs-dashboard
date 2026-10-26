@@ -92,6 +92,12 @@ Everything lives in one repository:
   halfway can still answer 200. If a retry succeeds, the script logs a `WARNING:`; if all three
   attempts fail, it logs an `ERROR:`. Other client errors, like a 404, are not
   retried.
+- No answer is read past 256 MB, compressed or after decompressing it, so
+  that whatever a server sends, by mistake or not, the script's memory stays
+  bounded. A larger answer is refused, not asked again, and logged as an
+  error like any failed request. The largest answer the script needs is a page
+  of a task group listing, about 28 MB in October 2026, so the limit leaves
+  about nine times that.
 - With `--log /path/to/file`, it appends its log to that file instead of
   writing it to stderr. Cron runs it with
   `--log $repo/html/data/cron_helper.log.txt`, so the log is shown on the page
@@ -276,8 +282,27 @@ cd cron_helper && python3 -m unittest discover -s tests
      each for the master, daily and weekly pushes), and by default GitHub only
      returns the latest one.
 3. **Task group to tasks**:
-   `GET https://community-tc.services.mozilla.com/api/queue/v1/task-group/<id>/list?limit=1000`,
-   following `continuationToken` if there is one.
+   `GET https://community-tc.services.mozilla.com/api/queue/v1/task-group/<id>/list?limit=50`,
+   following `continuationToken` until there is none.
+   - Each task in the listing carries the whole GitHub event of its push in
+     `task.extra.github_event`, up to 570 KB, which the script does not use.
+     A whole weekly group of 203 tasks was 116 MB (27 MB compressed), and
+     parsing it at once took about 490 MB of memory. So the listing is read
+     in pages of 50 tasks, about 28 MB each, and each page is reduced to the
+     few fields the script keeps before the next one is read. That costs a
+     few more requests, for example 5 instead of 1 for a weekly group and a
+     few seconds more, but only for the commits still in progress, and
+     Taskcluster's server is also lighter that way, because it builds each
+     answer whole in memory before sending it.
+   - The pages are cut by position in the order of the task IDs, so they are
+     not one snapshot. A task's state can be a few seconds older than another
+     page's, which does not matter for data refreshed every 3 hours. A task
+     added to the group between two pages (rare once a push has started; a
+     retried chunk is a new run of the same task, not a new task) shifts the
+     later ones, so one task can come again at the top of the next page; the
+     script reads each task ID only once. A task can only be skipped if one is
+     removed between two pages, and Taskcluster only removes tasks when they
+     expire, months later.
    - This returns each task's name, state, task group and runs, so a chunk
      that failed and passed when retried shows up as a task with more than one
      run.

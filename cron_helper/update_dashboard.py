@@ -313,7 +313,7 @@ class Updater:
             every_browser = []
             our_browsers = {port["browser"] for port in PORTS}
             for decision in decisions:
-                parsed_chunks = [chunk for chunk in (states.parse_task(entry) for entry in sources.task_group(self.fetcher, decision["task_group_id"])) if chunk]
+                parsed_chunks = [chunk for chunk in sources.task_group(self.fetcher, decision["task_group_id"], states.parse_task) if chunk]
                 every_browser.extend(parsed_chunks)
                 groups.append((decision["started_at"], [chunk for chunk in parsed_chunks if chunk["browser"] in our_browsers]))
         except REQUEST_ERRORS as error:

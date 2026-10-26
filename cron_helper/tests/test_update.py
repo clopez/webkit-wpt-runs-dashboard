@@ -6,6 +6,7 @@ import pathlib
 import tempfile
 import types
 import unittest
+import urllib.parse
 from unittest import mock
 
 import sources
@@ -62,6 +63,29 @@ GTK_RELEASES = listing(("webkitgtk-2.54.2.tar.xz.asc", "2026-10-23 08:55"), ("we
                        ("webkitgtk-2.54.2.tar.xz", "2026-10-23 08:55"), ("LATEST-STABLE-2.54.2", "2026-10-23 08:55"),
                        ("webkitgtk-2.54.1.tar.xz", "2026-10-02 10:58"), ("webkitgtk-2.53.92.tar.xz", "2026-09-02 10:15"),
                        ("webkitgtk-2.53.91.tar.xz", "2026-08-21 10:28"))
+
+
+class TaskGroupTest(unittest.TestCase):
+    def test_a_task_group_is_read_in_pages_and_each_page_is_reduced_before_the_next(self):
+        def entry(number):
+            return {"n": number, "status": {"taskId": f"task-{number}"}}
+        # A task added between the two pages shifts the second one, so the first page's last task comes again.
+        pages = {None: {"tasks": [entry(1), entry(2)], "continuationToken": "second"}, "second": {"tasks": [entry(2), entry(3)]}}
+        seen = []
+
+        def reply(url):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            self.assertEqual(query["limit"], [str(sources.TASK_GROUP_PAGE)])
+            token = query.get("continuationToken", [None])[0]
+            seen.append(f"page {token}")
+            return pages[token]
+
+        def keep(task):
+            seen.append(task["n"])
+            return task["n"] * 10
+
+        self.assertEqual(sources.task_group(FakeFetcher(reply), "group1", keep), [10, 20, 30])
+        self.assertEqual(seen, ["page None", 1, 2, "page second", 3])
 
 
 class ReleasesTest(unittest.TestCase):
