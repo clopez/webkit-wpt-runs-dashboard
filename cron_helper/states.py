@@ -45,6 +45,7 @@ def parse_task(entry):
     status = entry["status"]
     for run in status.get("runs", []):
         # Checked now, so a bad time counts as a bad answer instead of failing later, far from where it came from.
+        parse_time(run.get("scheduled"))
         parse_time(run.get("started"))
         parse_time(run.get("resolved"))
     return {
@@ -57,7 +58,7 @@ def parse_task(entry):
         "task_id": status["taskId"],
         "task_group_id": status.get("taskGroupId"),
         "state": status["state"],
-        "runs": [{"run_id": run["runId"], "state": run["state"], "reason": run.get("reasonResolved"),
+        "runs": [{"run_id": run["runId"], "state": run["state"], "reason": run.get("reasonResolved"), "scheduled": run.get("scheduled"),
                   "started": run.get("started"), "resolved": run.get("resolved")} for run in status.get("runs", [])],
     }
 
@@ -94,7 +95,8 @@ def summarize_chunks(chunks, also_expected=None):
     expected_by_suite = dict(also_expected or {})
     present = set()
     summary = {"total": len(chunks), "expected": 0, "completed": 0, "unfinished": 0, "failed": [], "missing": [], "retried": 0,
-               "first_started": None, "last_resolved": None, "run_seconds": 0, "timed_chunks": 0, "slowest": None}
+               "first_started": None, "last_resolved": None, "run_seconds": 0, "timed_chunks": 0, "slowest": None,
+               "running": 0, "pending": 0, "pending_last_scheduled": None}
     for chunk in chunks:
         present.add((chunk["suite"], chunk["chunk"]))
         if chunk["chunks_in_suite"]:
@@ -108,6 +110,13 @@ def summarize_chunks(chunks, also_expected=None):
                                       "state": chunk["state"], "reason": last_run.get("reason")})
         else:
             summary["unfinished"] += 1
+            if chunk["state"] == "running":
+                summary["running"] += 1
+            elif chunk["state"] == "pending":
+                summary["pending"] += 1
+                scheduled = chunk["runs"][-1]["scheduled"] if chunk["runs"] else None
+                if scheduled and time_key(scheduled) > time_key(summary["pending_last_scheduled"]):
+                    summary["pending_last_scheduled"] = scheduled
         for run in chunk["runs"]:
             if run["resolved"] and time_key(run["resolved"]) > time_key(summary["last_resolved"]):
                 summary["last_resolved"] = run["resolved"]
@@ -128,6 +137,52 @@ def summarize_chunks(chunks, also_expected=None):
     groups = collections.Counter(chunk["task_group_id"] for chunk in chunks if chunk.get("task_group_id"))
     summary["task_group_id"] = groups.most_common(1)[0][0] if groups else None
     return summary
+
+
+# The pace of the queue is how many of a push's tasks started in this last
+# stretch of time, but not over less than the minimum, which is too short to say.
+QUEUE_PACE_WINDOW = datetime.timedelta(hours=1)
+QUEUE_PACE_MIN_WINDOW = datetime.timedelta(minutes=10)
+
+
+def push_queue(chunks, now):
+    """What a push's own tasks, of every browser, say about the Taskcluster
+    queue: when each waiting one was queued, when the first task of each
+    task group started, and the starts of the last hour."""
+    first_started = {}
+    recent_starts = []
+    for chunk in chunks:
+        for run in chunk["runs"]:
+            if not run["started"]:
+                continue
+            group = chunk["task_group_id"]
+            if group not in first_started or time_key(run["started"]) < time_key(first_started[group]):
+                first_started[group] = run["started"]
+            if now - parse_time(run["started"]) <= QUEUE_PACE_WINDOW:
+                recent_starts.append(run["started"])
+    pending = [chunk["runs"][-1]["scheduled"] for chunk in chunks if chunk["state"] == "pending" and chunk["runs"] and chunk["runs"][-1]["scheduled"]]
+    return {"pending_scheduled": sorted(pending, key=time_key), "first_started": first_started, "recent_starts": sorted(recent_starts, key=time_key)}
+
+
+def queue_position(summary, push, now):
+    """Where the last waiting chunk of a cell is in the queue, and how fast the
+    queue moves. The queue is first come, first served, so once a task of the
+    cell's own task group has started, everything queued before that group
+    has left it, and what is still ahead of the last chunk is the push's
+    own waiting tasks queued before it. Until then other work is ahead, and
+    how much is not known without reading the whole queue, which is far too
+    big: every waiting task in it carries its push's whole GitHub event."""
+    estimate = {"pending": summary["pending"], "position": None, "tasks_per_hour": None}
+    first = (push or {}).get("first_started", {}).get(summary.get("task_group_id"))
+    if not first or not summary.get("pending_last_scheduled"):
+        return estimate
+    last = time_key(summary["pending_last_scheduled"])
+    estimate["position"] = sum(time_key(scheduled) <= last for scheduled in push["pending_scheduled"])
+    window = min(now - parse_time(first), QUEUE_PACE_WINDOW)
+    if window >= QUEUE_PACE_MIN_WINDOW:
+        starts = sum(now - parse_time(started) <= window for started in push["recent_starts"])
+        estimate["tasks_per_hour"] = round(starts / (window.total_seconds() / 3600)) or None
+    return estimate
 
 
 def upload_reason(suite, settings, status_entries):

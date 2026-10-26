@@ -310,10 +310,12 @@ class Updater:
             suite = sources.community_tc_suite(self.fetcher, sha)
             decisions = sources.decision_tasks(self.fetcher, sha)
             groups = []
+            every_browser = []
             our_browsers = {port["browser"] for port in PORTS}
             for decision in decisions:
-                parsed_chunks = [states.parse_task(entry) for entry in sources.task_group(self.fetcher, decision["task_group_id"])]
-                groups.append((decision["started_at"], [chunk for chunk in parsed_chunks if chunk and chunk["browser"] in our_browsers]))
+                parsed_chunks = [chunk for chunk in (states.parse_task(entry) for entry in sources.task_group(self.fetcher, decision["task_group_id"])) if chunk]
+                every_browser.extend(parsed_chunks)
+                groups.append((decision["started_at"], [chunk for chunk in parsed_chunks if chunk["browser"] in our_browsers]))
         except REQUEST_ERRORS as error:
             self.logger.error(f"{tag['name']}: {error}; " + ("keeping the previous data" if cached else "no data for this commit yet"))
             if cached:
@@ -348,6 +350,8 @@ class Updater:
             "task_groups": [decision["task_group_id"] for decision in decisions],
             "decision_failed": any(decision["conclusion"] in ("failure", "cancelled", "timed_out") for decision in decisions),
             "scheduling": not decisions_finished,
+            # Only a commit still in progress has waiting tasks, and a commit in progress is read again on every run, so this is never old.
+            "queue": states.push_queue(every_browser, self.now),
             "fetched_at": iso(self.now),
             "tags": tags,
             # A version that could not be read is not final either, so that the next run reads it.
@@ -374,6 +378,7 @@ class Updater:
         finished = sorted((chunk for chunk in chunks if chunk["runs"] and chunk["runs"][-1]["started"] and chunk["runs"][-1]["resolved"]),
                           key=lambda chunk: states.time_key(chunk["runs"][-1]["started"]))
         read_failed = False
+        logs_without_version = 0
         for chunk in finished[:VERSION_CANDIDATES]:
             run_id = chunk["runs"][-1]["run_id"]
             source = f"{chunk['task_id']}/{run_id}"
@@ -388,8 +393,31 @@ class Updater:
                 continue
             if version:
                 return {"version": version, "version_source": source, "version_read_failed": False, "version_failures": 0}
+            logs_without_version += 1
+        # One chunk that stopped before installing the browser is normal, but several logs in a row without the line can mean that WPT changed it.
+        if logs_without_version and logs_without_version == min(len(finished), VERSION_CANDIDATES):
+            self.logger.warning(f"{tag['name']}: no log of the first {plural(logs_without_version, 'finished chunk')} of {chunks[0]['browser']} "
+                                f"{chunks[0]['channel']} says which version it installed; the format of WPT's log may have changed")
         failures = previous.get("version_failures", 0) + read_failed
         return {"version": None, "version_source": None, "version_read_failed": read_failed and failures < VERSION_READS, "version_failures": failures}
+
+    def add_queue_estimates(self, rows):
+        """Adds when each waiting run should finish: once the tasks ahead of
+        its last chunk have started, at the pace its push's tasks have been
+        starting, plus the typical time of one of our chunks, the median over
+        the window of the average time of each run's chunks."""
+        cells = [cell for row in rows for channels in row["cells"].values() for cell in channels.values() if cell.get("chunks")]
+        chunk_times = sorted(cell["chunks"]["run_seconds"] / cell["chunks"]["timed_chunks"] for cell in cells if cell["chunks"].get("timed_chunks"))
+        for cell in cells:
+            queue = cell.get("queue")
+            if not queue:
+                continue
+            queue["expected_finish"] = None
+            if queue["position"] and queue["tasks_per_hour"] and chunk_times:
+                seconds_per_chunk = chunk_times[len(chunk_times) // 2]
+                queue["seconds_per_chunk"] = round(seconds_per_chunk)
+                seconds = queue["position"] / queue["tasks_per_hour"] * 3600 + seconds_per_chunk
+                queue["expected_finish"] = iso(self.now + datetime.timedelta(seconds=seconds))
 
     def add_check_run_links(self, tag, commit_data):
         for summary in commit_data["chunks"].values():
@@ -465,6 +493,8 @@ class Updater:
                                            scheduling=commit_data.get("scheduling", False),
                                            commit_unavailable=commit_data.get("unavailable", False))
                 cell["chunks"] = with_links(chunks, port["product"])
+                if chunks and chunks.get("pending") and not commit_data.get("final"):
+                    cell["queue"] = states.queue_position(chunks, commit_data.get("queue"), self.now)
                 if run:
                     cell["wptfyi"] = self.wptfyi_cell(port, channel, run, channel_runs)
                 row["cells"][port["key"]][channel] = cell
@@ -507,7 +537,7 @@ def with_links(chunks, product):
 def describe(cell):
     chunks = cell.get("chunks") or {}
     if cell["state"] == "running":
-        return f"running {chunks.get('completed', 0)}/{chunks.get('expected', 0)}"
+        return f"{chunks.get('running', 0)} running, {chunks.get('completed', 0)}/{chunks.get('expected', 0)} done"
     if cell["state"] == "failed":
         return f"failed ({len(chunks.get('failed', []))} failed, {len(chunks.get('missing', []))} missing)"
     return cell["state"].replace("_", " ")
@@ -532,6 +562,7 @@ def update(args, logger, recorder, token):
             updater.tags_by_sha.setdefault(tag["sha"], set()).add(tag["name"])
     rows = {kind: [updater.row(tag, channels, wptfyi_runs, statuses) for tag in reversed(tags_by_kind[kind])]
             for kind, channels in CHANNELS_BY_TAG_KIND.items()}
+    updater.add_queue_estimates(rows["daily"] + rows["weekly"])
     # Pruning drops what no row used, so with incomplete inputs it would throw away good data, like every diff.
     if updater.unchecked_listings or updater.tag_listing_failed:
         logger.info("Not cleaning up the cache this time, because some lists could not be read")
@@ -565,6 +596,10 @@ def update(args, logger, recorder, token):
     request_text = ", ".join(f"{service} {count}" for service, count in requests.items())
     logger.info(f"Wrote dashboard.json: {len(rows['daily'])} daily and {len(rows['weekly'])} weekly tags, {cells} cells"
                 + (f", {', '.join(problems)}" if problems else "") + f"; requests: {request_text}; {time.monotonic() - started:.1f} s")
+
+
+def plural(count, noun):
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def bundle_state(release, bundle):

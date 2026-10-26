@@ -247,7 +247,7 @@ function wptRunsBadge(rows, channel, href, noun = "WPT run") {
     return { port, row, cell: row?.cells[port.key][channel] };
   });
   const title = results.map(({ port, row, cell }) => row
-    ? `${port.label}: ${channel} of ${row.date}, ${testedVersion(cell) || "version not known"}, ${DECIDED_WPT_STATES[cell.state]}`
+    ? `${port.label}: ${channel} of ${row.date}, ${testedVersion(cell) || "version not known"}, ${outcomeText(cell)}`
     : `${port.label}: no finished ${channel} run`).join("\n");
   const outcomes = results.map(({ port, cell }) => ({ port,
     word: !cell ? "unknown" : cell.state === "uploaded" ? "uploaded" : cell.state === "not_uploaded" ? "not uploaded" : "failed" }));
@@ -350,7 +350,7 @@ function lastWptRunText(port, channel) {
   if (!row) return "No finished WPT run yet";
   const cell = row.cells[port.key][channel];
   const version = testedVersion(cell);
-  return `Last WPT run, ${shortDate(row.date)}: ${DECIDED_WPT_STATES[cell.state]}${version ? `, tested ${version}` : ""}`;
+  return `Last WPT run, ${shortDate(row.date)}: ${outcomeText(cell)}${version ? `, tested ${version}` : ""}`;
 }
 
 function releaseNode(port, channel) {
@@ -434,6 +434,32 @@ function errorText(key, text) {
     element("div", { class: "detail" }, isOpen ? text : `${text.slice(0, ERROR_PREVIEW_LENGTH)} [...]`), button);
 }
 
+function failedChunksText(chunks) {
+  const failed = chunks.failed?.length || 0, missing = chunks.missing?.length || 0;
+  return [failed && `${plural(failed, "chunk")} failed`, missing && `${plural(missing, "chunk")} missing`].filter(Boolean).join(", ") || "chunks failed";
+}
+
+// What a finished run came to, in a few words for tooltips and summaries.
+function outcomeText(cell) {
+  return cell.state === "failed" ? failedChunksText(cell.chunks || {}) : DECIDED_WPT_STATES[cell.state];
+}
+
+// The Taskcluster queue hands tasks out in order, so once a task of the run's
+// push has started, the tasks ahead of its last chunk are the push's own ones
+// queued before it, and the time is when they should have started.
+function queueNote(queue) {
+  const waiting = `${plural(queue.pending, "chunk")} waiting for a machine`;
+  if (!queue.position)
+    return element("div", { class: "detail", title: "The queue is first come, first served, and other pushes queued before this one are still waiting" },
+      `${waiting}; none of this push's tasks has started yet, so other work is still ahead of it`);
+  const title = queue.expected_finish
+    ? `An estimate from the last update: this push's tasks were starting at ${queue.tasks_per_hour} an hour, and one of our chunks takes about ${formatSeconds(queue.seconds_per_chunk)}`
+    : "No time yet: this push's tasks only started a few minutes before the last update, too few to tell how fast the queue moves";
+  return element("div", { class: "detail", title },
+    `${waiting} (the last one is number ${number.format(queue.position)} in the Taskcluster queue)`
+    + (queue.expected_finish ? ` · expected around ${formatTime(queue.expected_finish)}` : ""));
+}
+
 function stateCell(portKey, cell, row, channelLabel) {
   const chunks = cell.chunks || {};
   const top = element("div", { class: "top" });
@@ -441,8 +467,14 @@ function stateCell(portKey, cell, row, channelLabel) {
   const links = [];
   switch (cell.state) {
     case "running":
-      top.append(element("span", { class: "headline" }, `Running ${chunks.completed}/${chunks.expected}`));
-      details.push(`${plural(chunks.unfinished, "chunk")} not finished yet`);
+      // Data from before the script counted the running chunks has only the total of the unfinished ones.
+      if (chunks.running === undefined) {
+        top.append(element("span", { class: "headline" }, `Running · ${chunks.completed}/${chunks.expected} done`));
+        details.push(`${plural(chunks.unfinished, "chunk")} not finished yet`);
+      } else {
+        top.append(element("span", { class: "headline" }, `${chunks.running} Running · ${chunks.completed}/${chunks.expected} done`));
+        if (chunks.pending && !cell.queue) details.push(`${plural(chunks.pending, "chunk")} waiting for a machine`);
+      }
       break;
     case "waiting_for_suite":
       top.append(element("span", { class: "headline" }, "Waiting for the suite"));
@@ -454,8 +486,7 @@ function stateCell(portKey, cell, row, channelLabel) {
       break;
     case "failed": {
       const failed = chunks.failed || [], missing = chunks.missing || [];
-      const parts = [failed.length && plural(failed.length, "chunk") + " failed", missing.length && plural(missing.length, "chunk") + " missing"].filter(Boolean);
-      top.append(element("span", { class: "headline" }, parts.join(", ")));
+      top.append(element("span", { class: "headline" }, failedChunksText(chunks)));
       if (failed.length)
         details.push(element("div", { class: "chunk-links" }, failed.map(chunk => {
           const logs = [
@@ -510,6 +541,7 @@ function stateCell(portKey, cell, row, channelLabel) {
     const checks = githubChecksLink(row);
     if (checks) links.push(checks);
   }
+  if (cell.queue) details.push(queueNote(cell.queue));
   const node = element("div", { class: `cell ${STATE_KIND[cell.color] || "none"}` }, top,
     details.map(detail => typeof detail === "string" ? element("div", { class: "detail" }, detail) : detail));
   if (chunks.retried) node.append(element("div", { class: "note" }, `${plural(chunks.retried, "chunk")} passed after a retry`));

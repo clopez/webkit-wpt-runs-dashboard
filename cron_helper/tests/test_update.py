@@ -332,7 +332,8 @@ class UpdaterTest(unittest.TestCase):
 
     def test_a_chunk_that_stopped_before_installing_the_browser_is_skipped(self):
         fetcher = FakeFetcher(self.version_replies({1: "urllib.error.HTTPError: HTTP Error 503: Service Unavailable\n", 2: self.installed("2.54.1")}))
-        commit_data, _ = self.updater(fetcher).commit(TAG)
+        with self.assertNoLogs("test_update", level="WARNING"):
+            commit_data, _ = self.updater(fetcher).commit(TAG)
         self.assertEqual(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"], "2.54.1")
 
     def test_a_version_read_before_is_not_read_again(self):
@@ -350,10 +351,12 @@ class UpdaterTest(unittest.TestCase):
         self.assertIsNone(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"])
         self.assertFalse(commit_data["final"])
 
-    def test_a_log_with_an_unexpected_format_gives_no_version_and_no_error(self):
+    def test_logs_with_an_unexpected_format_give_no_version_and_a_warning(self):
         garbage = "\x00\x01 MiniBrowser bundle for channel nightly installed: something else entirely\n" + "x" * 5000
         fetcher = FakeFetcher(self.version_replies({1: garbage, 2: b"\xff\xfe\x00not text", 3: ""}))
-        commit_data, _ = self.updater(fetcher).commit(TAG)
+        with self.assertLogs("test_update", level="WARNING") as logged:
+            commit_data, _ = self.updater(fetcher).commit(TAG)
+        self.assertIn("the format of WPT's log may have changed", logged.output[0])
         self.assertIsNone(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"])
         self.assertTrue(commit_data["final"])
 
@@ -364,6 +367,36 @@ class UpdaterTest(unittest.TestCase):
             for _ in range(update_dashboard.VERSION_READS):
                 commit_data, _ = self.updater(FakeFetcher(replies), cache).commit(TAG)
         self.assertTrue(commit_data["final"])
+
+    def queue_rows(self, position, tasks_per_hour):
+        waiting = {"chunks": {"timed_chunks": 0, "run_seconds": 0}, "queue": {"pending": 2, "position": position, "tasks_per_hour": tasks_per_hour}}
+        done = {"chunks": {"timed_chunks": 33, "run_seconds": 33 * 1500}}
+        return [{"cells": {"gtk": {"nightly": waiting}}}, {"cells": {"gtk": {"nightly": done}}}]
+
+    def test_the_expected_time_is_when_the_tasks_ahead_have_started_plus_one_chunk(self):
+        rows = self.queue_rows(position=30, tasks_per_hour=60)
+        self.updater(FakeFetcher({})).add_queue_estimates(rows)
+        # 30 tasks at 60 an hour take 30 minutes, and then the chunk takes the 25 minutes of a chunk.
+        self.assertEqual(rows[0]["cells"]["gtk"]["nightly"]["queue"]["expected_finish"], update_dashboard.iso(NOW + datetime.timedelta(minutes=55)))
+        self.assertNotIn("queue", rows[1]["cells"]["gtk"]["nightly"])
+
+    def test_no_time_is_expected_without_a_position_or_a_pace(self):
+        for position, pace in ((None, None), (30, None)):
+            rows = self.queue_rows(position, pace)
+            self.updater(FakeFetcher({})).add_queue_estimates(rows)
+            self.assertIsNone(rows[0]["cells"]["gtk"]["nightly"]["queue"]["expected_finish"])
+
+    def test_a_waiting_chunk_gives_its_cell_a_place_in_the_queue_without_any_extra_request(self):
+        replies = self.replies()
+        waiting = chunk_entry("webkitgtk_minibrowser", "reftest", 1, 1, "pending")
+        waiting["status"]["runs"] = [{"runId": 0, "state": "pending", "scheduled": "2026-09-29T11:00:00Z"}]
+        started = chunk_entry("wpewebkit_minibrowser", "reftest", 1, 1)
+        started["status"]["runs"][0].update({"scheduled": "2026-09-29T10:59:00Z", "started": "2026-09-29T11:30:00Z"})
+        replies["task-group/group1/list"] = {"tasks": [started, waiting]}
+        fetcher = FakeFetcher(replies)
+        row = self.row(self.updater(fetcher), {})
+        self.assertEqual(row["cells"]["gtk"]["nightly"]["queue"], {"pending": 1, "position": 1, "tasks_per_hour": 2})
+        self.assertFalse(any("task-queues" in url or "worker-pool" in url for url in fetcher.urls))
 
     def test_a_shared_commit_uses_one_github_lookup_per_run(self):
         cache = {"version": update_dashboard.CACHE_VERSION}

@@ -94,6 +94,38 @@ class ChunksTest(unittest.TestCase):
         self.assertEqual(summary["timed_chunks"], 2)
         self.assertEqual((summary["slowest"]["name"], summary["slowest"]["seconds"]), ("wpt-wpewebkit_minibrowser-nightly-reftest-1", 60 * 60))
 
+    def queued(self, name, state, scheduled, started=None, group="groupA"):
+        run = {"runId": 0, "state": state, "scheduled": scheduled, "started": started}
+        return states.parse_task(task(name, state=state, chunk_of=33, runs=[run], group=group))
+
+    def test_the_summary_counts_running_and_waiting_chunks_and_when_the_last_waiting_one_was_queued(self):
+        chunks = [self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-1", "pending", "2026-09-29T12:40:01Z"),
+                  self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-2", "pending", "2026-09-29T12:40:03Z"),
+                  self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-3", "running", "2026-09-29T12:40:02Z", "2026-09-29T13:00:00Z")]
+        summary = states.summarize_chunks(chunks)
+        self.assertEqual((summary["running"], summary["pending"], summary["pending_last_scheduled"]), (1, 2, "2026-09-29T12:40:03Z"))
+
+    def test_the_position_counts_the_push_s_waiting_tasks_of_every_browser_queued_before_the_last_chunk(self):
+        now = datetime.datetime(2026, 9, 29, 14, 0, tzinfo=datetime.timezone.utc)
+        push = [self.queued("wpt-chrome-stable-testharness-1", "pending", "2026-09-29T12:40:01Z"),
+                self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-1", "pending", "2026-09-29T12:40:02Z"),
+                self.queued("wpt-firefox-beta-testharness-1", "pending", "2026-09-29T12:40:03Z"),
+                self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-2", "pending", "2026-09-29T12:40:04Z"),
+                self.queued("wpt-chrome-stable-testharness-2", "pending", "2026-09-29T12:40:05Z")]
+        # 30 tasks of the push started in the half hour since its group's first one did, so 60 an hour.
+        push += [self.queued(f"wpt-chrome-stable-reftest-{number}", "completed", "2026-09-29T12:40:00Z", "2026-09-29T13:30:00Z") for number in range(30)]
+        summary = states.summarize_chunks([chunk for chunk in push if chunk["browser"] == "wpewebkit_minibrowser"])
+        estimate = states.queue_position(summary, states.push_queue(push, now), now)
+        self.assertEqual(estimate, {"pending": 2, "position": 4, "tasks_per_hour": 60})
+
+    def test_the_position_is_unknown_until_a_task_of_the_cell_s_own_group_has_started(self):
+        now = datetime.datetime(2026, 9, 29, 14, 0, tzinfo=datetime.timezone.utc)
+        push = [self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-1", "pending", "2026-09-29T12:40:02Z"),
+                # A task of another group of the same commit, queued hours before, says nothing about what is ahead of ours.
+                self.queued("wpt-chrome-canary-reftest-1", "completed", "2026-09-29T09:28:00Z", "2026-09-29T13:30:00Z", group="groupB")]
+        summary = states.summarize_chunks(push[:1])
+        self.assertEqual(states.queue_position(summary, states.push_queue(push, now), now), {"pending": 1, "position": None, "tasks_per_hour": None})
+
     def test_a_time_without_a_zone_is_taken_as_utc(self):
         self.assertEqual(states.parse_time("2026-09-27T06:00:00"), states.parse_time("2026-09-27T06:00:00Z"))
 

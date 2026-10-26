@@ -321,10 +321,13 @@ cd cron_helper && python3 -m unittest discover -s tests
    - A chunk that stopped before installing the browser, such as one whose
      download failed, has no such line, so the script tries the next one, up
      to 3. A log that lacks the line or has an unexpected format gives no
-     version and no error, and the cell says "version unknown". A log that
-     cannot be downloaded is logged as a warning, and keeps the commit open
-     so that the next run tries again, but only on 8 runs, so that a log that
-     stays broken does not keep its commit open for the whole window.
+     version and never an error that stops the update, and the cell says
+     "version unknown". However, when none of the logs read for a run has the
+     line, the script logs a warning, which the header shows, because it can
+     mean that WPT changed the line and the parsing has to follow. A log that
+     cannot be downloaded is logged as a warning too, and keeps the commit
+     open so that the next run tries again, but only on 8 runs, so that a log
+     that stays broken does not keep its commit open for the whole window.
 5. **Check suite status**:
    `GET /repos/web-platform-tests/wpt/commits/<sha>/check-suites?app_id=40788`,
    40788 being the "Community-TC Integration" app. The suite gives `status`,
@@ -379,6 +382,42 @@ cd cron_helper && python3 -m unittest discover -s tests
      matched to a commit by `full_revision_hash`. They don't say the channel,
      so on a commit with a weekly tag the stable and beta cells of a port show
      the same entries.
+8. **Where waiting chunks are in the queue**, with no request of its own:
+   the task group listing of step 3 already has every task of the push, of
+   every browser, with when each run was queued (`scheduled`) and started.
+   - The Taskcluster queue is first come, first served: every WPT task has
+     the same priority, and the tasks leave it in the order they were queued.
+     Every push to master queues a full run of Chrome Canary and Firefox
+     Nightly, 70 tasks, so a burst of merges can fill the pool for many hours;
+     for example 46 pushes in an hour on 2026-10-25 delayed the daily runs of
+     that day and the next one by 8 to 9 hours.
+   - So once a task of a cell's own task group has started, everything
+     queued before that group has left the queue, and what is still ahead of
+     the cell's last waiting chunk is the push's own waiting tasks queued
+     before it. Its position is the number of those tasks. Checked against
+     the real queue on 2026-10-26, this was 4 short of the real position in
+     every cell, at around 300, which are tasks of other pushes queued in the
+     same minutes.
+   - Until a task of the group has started, other pushes are still ahead,
+     and how much is not known, so the cell only says that its chunks wait
+     and that other work is ahead of them.
+   - The pace is how many of the push's tasks started in the last hour, or
+     since its group's first task started if that was less than an hour
+     ago, but not over less than 10 minutes. That is the pace of the whole
+     queue, because once the group's tasks have started they are the ones at
+     its head. The run should finish when the tasks ahead of its last chunk
+     have started at that pace, plus the typical time of one of our chunks
+     (the median, over the runs in the window, of the average time of their
+     chunks). The pace changes with what runs, so the page says "around".
+   - The cell gets, for example,
+     `"queue": {"pending": 17, "position": 266, "tasks_per_hour": 93, "seconds_per_chunk": 1560, "expected_finish": "2026-10-26T20:39:00Z"}`.
+   - Two other ways were tried and dropped. Working the pace out from the
+     pool's 80 machines and the length of our chunks assumed that every task
+     takes as long as ours, but the other browsers' chunks take up to twice
+     as long, and it was about twice too fast. Reading the queue itself
+     (`/api/queue/v1/task-queues/<queue>/pending`) gives the exact position,
+     but each waiting task in it carries its push's whole GitHub event, up
+     to 570 KB, so the list of about 900 tasks was 137 MB, 31 MB compressed.
 
 ## State of each cell (one browser and channel, for one tag)
 
@@ -395,7 +434,7 @@ a run that is on wpt.fyi is green whatever else happened:
 | a decision task is still running, and chunks are missing or there are none yet | yellow: scheduling tasks |
 | no tasks for this browser and channel, none expected from the other port, and a decision task failed | red: decision task failed |
 | no tasks for this browser and channel, and none expected from the other port | grey: "no run" |
-| chunks unscheduled, pending or running | yellow: running (completed/expected) |
+| chunks unscheduled, pending or running | yellow: running (completed/expected), and while chunks wait for a machine, where the last one is in the queue and when the run should finish |
 | any chunk `failed` / `exception`, or missing | red: the failed and missing chunks, with links (see below) |
 | our chunks passed, the suite is not finished | yellow: waiting for the suite to finish |
 | our chunks passed, the suite is still not finished 48 hours later | red: suite never finished |
@@ -776,7 +815,8 @@ right. From top to bottom:
    none yet, it names it, for example "WPE WPT run uploaded, GTK unknown", in
    grey, or in red if the other one failed. Hovering a
    badge shows which build or run it is about, with the version each WPT run
-   tested, and clicking it goes to that section.
+   tested and, for a failed one, how many chunks failed, and clicking it goes
+   to that section.
 2. **Nightly bundles**, in each column: the builds of that port's packaging
    bot on build.webkit.org. This block has a tinted background and a
    frame of its own, so it reads as clearly separate from the WPT runs below
@@ -857,7 +897,7 @@ cannot shift the cells of the other days.
                        "slowest": {"name": "…", "task_id": "…", "seconds": 3483, "task_url": "…"},
                        "version": "2.55.0 (321964@main)", "version_source": "<taskId>/<runId>",
                        "version_read_failed": false, "version_failures": 0,
-                       "task_group_id": "…", "task_group_url": "…"},
+                       "task_queue": "proj-wpt/ci-gw", "task_group_id": "…", "task_group_url": "…"},
             "wptfyi": {
               "run_id": 5193370485129216, "time_start": "…", "created_at": "…",
               "browser_version": "2.55.0 (321964@main)", "identifier": "321964@main",
