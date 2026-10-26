@@ -124,9 +124,11 @@ Two things to check:
   the script writes in `html/data/`, and reach them, which may need
   `chmod o+x` on the directories above them, such as your home directory.
 - The page looks for new data when an update is due, asking the server
-  whether the files changed, so the server should send `Last-Modified` or
-  `ETag` headers and answer 304 when nothing changed, which Apache and nginx
-  do for static files by default. No other caching settings are needed.
+  whether the files changed, so the server should send `Last-Modified`
+  headers and answer 304 when nothing changed, which Apache and nginx do for
+  static files by default. It also reads the server's time from the `Date`
+  header, so the page and cron must run on the same clock, or on clocks kept
+  in sync. No other caching settings are needed.
 
 Only `html/` must be served. The cache and the rotated logs stay out of it on
 purpose, and the token is never written anywhere by the script.

@@ -4,14 +4,14 @@ const DATA_DIR = "data/";
 const DATA_URL = `${DATA_DIR}dashboard.json`;
 const LOG_URL = `${DATA_DIR}cron_helper.log.txt`;
 // The data only changes when the script runs, so the page looks for new data
-// only once an update is due: a minute after it starts, because a run takes
-// about that long, then every minute, and after half an hour, when something
-// is clearly wrong, every 5 minutes. Each check is cheap when nothing changed,
-// because the browser asks the server whether the file changed (HTTP 304).
-const FIRST_CHECK_AFTER_UPDATE_MS = 60000;
-const CHECK_WHILE_DUE_MS = 60000;
-const DUE_FOR_MINUTES = 30;
+// only once an update is due, by the server's clock: from 15 seconds after the
+// due time, because a run takes about 40 seconds, every 10 seconds, then less
+// and less often the later the update is. The log is written while the script
+// runs, so before 2 minutes it is only reloaded along with new data.
+const FIRST_CHECK_AFTER_DUE_MS = 15000;
+const CHECK_STEPS = [{ untilMs: 2 * 60000, everyMs: 10000 }, { untilMs: 5 * 60000, everyMs: 30000 }, { untilMs: 10 * 60000, everyMs: 60000 }];
 const CHECK_WHEN_LATE_MS = 5 * 60000;
+const LOG_CHECKS_AFTER_DUE_MS = 2 * 60000;
 // Normal runs take under a minute, so after this long the update is called late.
 const UPDATE_LATE_AFTER_MINUTES = 5;
 const STEP = 3;
@@ -47,6 +47,26 @@ let logError = null;
 let logLoadedAt = null;
 let logFailedAt = null;
 let logResizeObserver = null;
+let dataVersion = null;
+let serverClockOffsetMs = 0;
+
+// The times in the data come from the server, so they are compared with its
+// clock, not with the browser's, which may be wrong by minutes.
+function serverNow() {
+  return Date.now() + serverClockOffsetMs;
+}
+
+function serverNowIso() {
+  return new Date(serverNow()).toISOString();
+}
+
+// The Date header has whole seconds, cut down, so the server's time is half a
+// second later on average, and it was read somewhere between sending the
+// request and getting the answer.
+function learnServerClock(dateHeader, sentAt, receivedAt) {
+  const serverTime = Date.parse(dateHeader);
+  if (!Number.isNaN(serverTime)) serverClockOffsetMs = serverTime + 500 - (sentAt + receivedAt) / 2;
+}
 
 const number = new Intl.NumberFormat("en-US");
 
@@ -191,7 +211,7 @@ function sourceLink() {
 // clock, so they are redrawn on their own between two loads of the data.
 function generatedParts() {
   if (!dashboard) return [];
-  const age = Date.now() - new Date(dashboard.generated_at);
+  const age = serverNow() - new Date(dashboard.generated_at);
   return [element("span", {}, "Data from ", element("b", {}, formatTime(dashboard.generated_at)), ` (${formatAge(age)} ago${nextUpdateText()})`),
     lastUpdateBadge(age)];
 }
@@ -217,10 +237,20 @@ function nextUpdateTime() {
   return (Math.floor(new Date(dashboard.generated_at) / period) + 1) * period;
 }
 
+// Time since the last update was due, which is negative until the next one is.
+// Once it is due, every later scheduled time counts as a new due time, because
+// when a run brings no new data, the next one is just as likely to.
+function timeSinceDue(now) {
+  const due = nextUpdateTime();
+  if (now < due) return now - due;
+  const period = dashboard.settings.update_every_minutes * 60000;
+  return now - Math.floor(now / period) * period;
+}
+
 function nextUpdateText() {
   const next = nextUpdateTime();
   if (next === null) return "";
-  const left = next - Date.now();
+  const left = next - serverNow();
   if (left >= 60000) return `, next update in ${formatAge(left)}`;
   if (-left <= UPDATE_LATE_AFTER_MINUTES * 60000) return ", next update any moment now";
   return `, next update ${formatAge(-left)} late`;
@@ -367,7 +397,7 @@ function buildsSection() {
 const RELEASE_CHANNELS = ["stable", "beta"];
 
 function releaseAge(entry) {
-  return formatAge(Date.now() - new Date(entry.release.published_at));
+  return formatAge(serverNow() - new Date(entry.release.published_at));
 }
 
 function bundlesBadge(channel) {
@@ -875,7 +905,7 @@ function logSection() {
   logResizeObserver.observe(box);
   requestAnimationFrame(() => { box.scrollTop = view.logScrolledUp ? view.logScrollTop : box.scrollHeight; });
   const reloadFailed = logText !== null && logError
-    ? element("div", { class: "stale-note" }, `Could not reload the log at ${formatTime(logFailedAt)} (${logError}); showing the one loaded at ${formatTime(logLoadedAt)}.`)
+    ? element("div", { class: "stale-note" }, `Could not reload the log since ${formatTime(logFailedAt)} (${logError}); showing the one loaded at ${formatTime(logLoadedAt)}.`)
     : null;
   return element("section", { class: "log", id: "log", "aria-label": "Update log" },
     element("div", { class: "log-head" }, element("h2", {}, "Update log"),
@@ -909,25 +939,64 @@ function render() {
   window.scrollTo(0, scrollY);
 }
 
+function fileVersion(response) {
+  return response.headers.get("Last-Modified") || response.headers.get("ETag");
+}
+
+// Each check is a HEAD request that skips the browser's cache, because after a
+// conditional request answered 304, Chromium (checked with 149) gives the Date
+// header saved with the cached copy, which can be hours old, and that would
+// throw the server clock off. It also says whether the data changed, so the
+// data itself is only downloaded when it did. Returns whether it changed.
+async function loadData() {
+  const sentAt = Date.now();
+  const head = await fetch(DATA_URL, { method: "HEAD", cache: "no-store" });
+  learnServerClock(head.headers.get("Date"), sentAt, Date.now());
+  if (!head.ok) throw new Error(`HTTP ${head.status}`);
+  const version = fileVersion(head);
+  if (dashboard && version && version === dataVersion) return false;
+  const response = await fetch(DATA_URL, { cache: "no-cache" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  dashboard = await response.json();
+  dataVersion = fileVersion(response);
+  return true;
+}
+
+// Some runs only write to the log, such as one that finds the previous run
+// still going, or one that is killed, so the log is also reloaded on its own
+// once a run should have finished.
+function logCheckDue() {
+  return nextUpdateTime() === null || timeSinceDue(serverNow()) >= LOG_CHECKS_AFTER_DUE_MS;
+}
+
 async function load() {
-  const [dashboardResult, logResult] = await Promise.allSettled([
-    fetch(DATA_URL, { cache: "no-cache" }).then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); }),
-    fetch(LOG_URL, { cache: "no-cache" }).then(response => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.text(); }),
-  ]);
-  if (dashboardResult.status === "fulfilled") {
-    dashboard = dashboardResult.value;
+  const errorsBefore = [dashboardError, logError];
+  let dataChanged = false;
+  try {
+    dataChanged = await loadData();
     dashboardError = null;
-  } else {
-    dashboardError = String(dashboardResult.reason.message || dashboardResult.reason);
+  } catch (error) {
+    dashboardError = String(error.message || error);
   }
-  if (logResult.status === "fulfilled") {
-    logText = logResult.value;
-    logError = null;
-    logLoadedAt = new Date().toISOString();
-  } else {
-    logError = String(logResult.reason.message || logResult.reason);
-    logFailedAt = new Date().toISOString();
+  let logChanged = false;
+  if (dataChanged || logCheckDue()) {
+    try {
+      const response = await fetch(LOG_URL, { cache: "no-cache" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const text = await response.text();
+      logChanged = text !== logText;
+      logText = text;
+      logError = null;
+      logLoadedAt = serverNowIso();
+    } catch (error) {
+      const message = String(error.message || error);
+      if (message !== logError) logFailedAt = serverNowIso();
+      logError = message;
+    }
   }
+  // Redrawing loses the keyboard focus and closes the tooltips, so it is only
+  // done when something changed, not on every check.
+  if (!dataChanged && !logChanged && dashboardError === errorsBefore[0] && logError === errorsBefore[1]) return;
   try {
     render();
   } catch (error) {
@@ -935,18 +1004,22 @@ async function load() {
     // same data fails again on every reload, so the banner is replaced, not added.
     document.getElementById("render-error")?.remove();
     document.getElementById("page").prepend(element("div", { class: "banner bad", id: "render-error" },
-      `Could not draw the data loaded at ${formatTime(new Date().toISOString())}: ${error.message || error}. Showing what was drawn before.`));
+      `Could not draw the data loaded at ${formatTime(serverNowIso())}: ${error.message || error}. Showing what was drawn before.`));
   }
 }
 
 function nextCheckDelay() {
-  const due = nextUpdateTime();
-  if (due === null) return CHECK_WHEN_LATE_MS;
-  const now = Date.now();
-  const first = due + FIRST_CHECK_AFTER_UPDATE_MS;
+  if (nextUpdateTime() === null) return CHECK_WHEN_LATE_MS;
+  const period = dashboard.settings.update_every_minutes * 60000;
+  const sinceDue = timeSinceDue(serverNow());
+  const untilFirstCheck = FIRST_CHECK_AFTER_DUE_MS - sinceDue;
+  // The server's clock is only known to about a second, so a first check that
+  // comes a little early counts as on time, instead of setting another one.
   // Capped, so that a wrong time in the data can not stop the checks for long.
-  if (now < first) return Math.min(first - now, dashboard.settings.update_every_minutes * 60000 + FIRST_CHECK_AFTER_UPDATE_MS);
-  return now < due + DUE_FOR_MINUTES * 60000 ? CHECK_WHILE_DUE_MS : CHECK_WHEN_LATE_MS;
+  if (untilFirstCheck > 1000) return Math.min(untilFirstCheck, period + FIRST_CHECK_AFTER_DUE_MS);
+  const every = CHECK_STEPS.find(step => sinceDue < step.untilMs)?.everyMs ?? CHECK_WHEN_LATE_MS;
+  // Never past the next scheduled time, so a late page starts again at its quick checks.
+  return Math.min(every, period + FIRST_CHECK_AFTER_DUE_MS - sinceDue);
 }
 
 let checkTimer = null;

@@ -182,19 +182,36 @@ Everything lives in one repository:
 ### The page
 
 - It fetches `data/dashboard.json` and the log, and while the tab stays open
-  it looks for new data only when an update is due: nothing until a minute
-  after the expected time of the next update (a normal run takes under a
-  minute; on 2026-10-26 the file was written 42 seconds past the hour), then
-  every minute, and after half an hour, when something is clearly wrong,
-  every 5 minutes. Data from an older script that does not say its schedule
-  is looked for every 5 minutes. Each check asks the server whether the files
-  changed (`cache: "no-cache"`), so when nothing changed the server answers
-  304 with no body, instead of the 437 KB of `dashboard.json`; the server of
-  the live dashboard does that for both files. Because a computer that sleeps
-  can hold a timer back, a tab that comes back into view checks at once if a
-  check is overdue. New data is drawn keeping what is open, scrolled or
-  expanded. After an update run by hand, an open page shows it at its next
-  check, or when it is reloaded.
+  it looks for new data only when an update is due. Cron starts the script
+  by the server's clock, and the times in the data come from it too, so the
+  page works out how far the browser's clock is from the server's, from the
+  `Date` header of each check, and uses the server's time for the schedule
+  and for every age it shows. A normal run writes its data about 42 seconds
+  past the hour, so the page checks nothing until 15 seconds after the
+  expected time of the update, then every 10 seconds until 2 minutes, every
+  30 seconds until 5 minutes, every minute until 10 minutes, and every 5
+  minutes after that. When an hour goes by without new data, the next
+  scheduled time starts the same sequence again, because that run is just as
+  likely to bring it. Data from an older script that does not say its
+  schedule is looked for every 5 minutes.
+- Each check is a `HEAD` request for `dashboard.json` that skips the
+  browser's cache (`cache: "no-store"`), and the file is only downloaded when
+  its `Last-Modified` changed. A conditional request answered 304 would cost
+  the same, but its `Date` header is not to be trusted: Chromium 149 gives
+  the one saved with the cached copy, which can be hours old.
+- The log is written while the script runs, so before 2 minutes past the
+  expected time it is only reloaded together with new data, instead of
+  downloading a half-written log on every check. From then on it is also
+  checked on its own at every check, because some runs only write to the
+  log, such as one that finds the previous run still going or one that is
+  killed. It is asked for with a conditional request (`cache: "no-cache"`),
+  so when it did not change the server answers 304 with no body.
+- The page is only redrawn when the data, the log or an error changed,
+  because redrawing loses the keyboard focus and closes the tooltips. New
+  data is drawn keeping what is open, scrolled or expanded. Because a
+  computer that sleeps can hold a timer back, a tab that comes back into
+  view checks at once if a check is overdue. After an update run by hand, an
+  open page shows it at its next check, or when it is reloaded.
 - The age of the data and the time to the next update are redrawn every 30
   seconds, on their own, because redrawing the whole page would also lose
   the keyboard focus.
