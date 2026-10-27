@@ -37,7 +37,7 @@ wpt.fyi that no visitor should have to wait for:
 The runs are daily at most, but a run in progress changes during the day: its
 chunks finish, it waits for the suite, it is uploaded, and the estimate of when
 it will finish moves with the queue. Running every hour keeps that fresh, and a
-normal update costs only some 30 to 50 requests. However, the page always shows
+normal update costs only some 40 to 60 requests. However, the page always shows
 the state as it was when the script last ran, so the page says when that was.
 
 ### Repository layout
@@ -212,9 +212,11 @@ Everything lives in one repository:
   computer that sleeps can hold a timer back, a tab that comes back into
   view checks at once if a check is overdue. After an update run by hand, an
   open page shows it at its next check, or when it is reloaded.
-- The age of the data and the time to the next update are redrawn every 30
-  seconds, on their own, because redrawing the whole page would also lose
-  the keyboard focus.
+- The age of the data, the time to the next update and the time left before
+  each estimated finish are redrawn every 30 seconds, on their own, by the
+  server's clock, because redrawing the whole page would also lose the
+  keyboard focus. So the time left stays right between two updates, while
+  the estimate itself only changes with the next one.
 - It loads nothing from other servers: no fonts, libraries or analytics, so
   visitors' addresses are not sent anywhere else.
 - Every link built from data goes through one function that only accepts HTTPS
@@ -268,9 +270,10 @@ token in the environment and the log in `html/data/`:
 
 The script takes its own lock, so a run that starts while the previous one is
 still going logs that and stops. The first run fills the cache with the last
-`MAX_AGE_DAYS` days, which takes about 15 minutes and some 1,100 requests
-(about 150 of them to GitHub); later runs take 15 to 40 seconds and some 30 to
-50 requests (about 6 to GitHub), the most while a run is in progress.
+`MAX_AGE_DAYS` days, which takes about 15 minutes and some 1,150 requests
+(about 150 of them to GitHub); later runs take about 40 seconds and some 40 to
+60 requests (about 6 to GitHub), the most while a run is in progress or the
+Taskcluster queue is long.
 [README.md](README.md) has the full instructions: the token, the cron job, the
 web server, and how to try it locally.
 
@@ -443,42 +446,153 @@ cd cron_helper && python3 -m unittest discover -s tests
      matched to a commit by `full_revision_hash`. They don't say the channel,
      so on a commit with a weekly tag the stable and beta cells of a port show
      the same entries.
-8. **Where waiting chunks are in the queue**, with no request of its own:
-   the task group listing of step 3 already has every task of the push, of
-   every browser, with when each run was queued (`scheduled`) and started.
-   - The Taskcluster queue is first come, first served: every WPT task has
-     the same priority, and the tasks leave it in the order they were queued.
-     Every push to master queues a full run of Chrome Canary and Firefox
-     Nightly, 70 tasks, so a burst of merges can fill the pool for many hours;
-     for example 46 pushes in an hour on 2026-10-25 delayed the daily runs of
-     that day and the next one by 8 to 9 hours.
-   - So once a task of a cell's own task group has started, everything
-     queued before that group has left the queue, and what is still ahead of
-     the cell's last waiting chunk is the push's own waiting tasks queued
-     before it. Its position is the number of those tasks. Checked against
-     the real queue on 2026-10-26, this was 4 short of the real position in
-     every cell, at around 300, which are tasks of other pushes queued in the
-     same minutes.
-   - Until a task of the group has started, other pushes are still ahead,
-     and how much is not known, so the cell only says that its chunks wait
-     and that other work is ahead of them.
-   - The pace is how many of the push's tasks started in the last hour, or
-     since its group's first task started if that was less than an hour
-     ago, but not over less than 10 minutes. That is the pace of the whole
-     queue, because once the group's tasks have started they are the ones at
-     its head. The run should finish when the tasks ahead of its last chunk
-     have started at that pace, plus the typical time of one of our chunks
-     (the median, over the runs in the window, of the average time of their
-     chunks). The pace changes with what runs, so the page says "around".
-   - The cell gets, for example,
-     `"queue": {"pending": 17, "position": 266, "tasks_per_hour": 93, "seconds_per_chunk": 1560, "expected_finish": "2026-10-26T20:39:00Z"}`.
-   - Two other ways were tried and dropped. Working the pace out from the
-     pool's 80 machines and the length of our chunks assumed that every task
-     takes as long as ours, but the other browsers' chunks take up to twice
-     as long, and it was about twice too fast. Reading the queue itself
-     (`/api/queue/v1/task-queues/<queue>/pending`) gives the exact position,
-     but each waiting task in it carries its push's whole GitHub event, up
-     to 570 KB, so the list of about 900 tasks was 137 MB, 31 MB compressed.
+8. **When a run and its suite should finish**, from the Taskcluster queue:
+   `GET https://community-tc.services.mozilla.com/api/queue/v1/task-queues/proj-wpt%2Fci-gw/pending?limit=50`,
+   following `continuationToken`, once per run.
+   - Every WPT task, of every browser and push, waits in that one queue, and
+     its pool has 80 machines. Workers take the tasks by priority and then in
+     the order they were queued (`order by priority desc, inserted asc` in
+     `queue_pending_tasks_get`, Taskcluster's `db/versions/0093.yml`), and
+     every WPT task has priority "lowest", so the queue is first come, first
+     served. The list is in that same order, so a task's place in it is its
+     position. Every push to master queues a full run of Chrome Canary and
+     Firefox Nightly, 70 tasks, so a burst of merges can fill the pool for
+     many hours; for example 46 pushes in an hour on 2026-10-25 delayed the
+     daily runs of that day and the next one by 8 to 9 hours.
+   - The list is read in pages of 50, like a task group listing, because
+     each task in it also carries its push's whole GitHub event. Its size
+     depends on what waits: on 2026-10-26 at 22:00, 294 tasks were 16 MB (3
+     MB compressed) and took 5 seconds, but while a weekly push waits, whose
+     tasks carry the largest events, about 900 tasks were 137 MB (31 MB
+     compressed). The pages are cut after the last task read, not by
+     position, so tasks that leave the queue while it is read shift nothing.
+   - The pace is how many tasks left the queue since the previous run, per
+     hour. Tasks leave it in order, so those are the tasks that were ahead of
+     the current first one in the previous run's list, which the cache keeps
+     as `taskId/runId`, with the time it was read, which after filling the
+     cache again can be many minutes after the run started. A list less than
+     10 minutes old, as after an update run by hand, is too recent to measure
+     from, so that run uses the pace measured with it, and keeps it for the
+     next run. The queue is read on every run, even with nothing of ours
+     waiting, so that the pace is known as soon as something is.
+   - When the first task now was not in the previous list, the queue ran dry
+     in between, and the count only says that at least the tasks waiting
+     then have left, which can be far fewer than the machines can take; for
+     example 3 an hour, when they take 150 while busy. So the last pace
+     measured while the queue was busy is used instead, if it is at most 6
+     hours old, which covers a quiet night; without one there is no
+     estimate. When the first task is the same as before, the queue has not
+     moved in an hour and its machines are probably stuck, so there is no
+     estimate either, and the page says why, instead of hiding it with an
+     older pace. The only hour without any pace is the first one after the
+     cache is filled again, when there is no earlier list to compare with.
+   - The positions could be worked out from the push's own tasks alone, with
+     no request, and that is what the dashboard did at first: once a task of
+     the push's group has started, everything queued before the group has
+     left. However, a chunk that is retried, or one that waits for a
+     download task, as Firefox stable and beta do, joins the queue later,
+     behind every task queued in between by other pushes. On 2026-10-26 that
+     put a retried chunk at 82 when it was really 154, and the pace, measured
+     from the push's own starts, was unknown because none of them had started
+     in the last hour. A task's position also cannot be worked out from the
+     pool's 80 machines and the length of our chunks, because the other
+     browsers' chunks take up to twice as long.
+   - A waiting task should start when the tasks ahead of it have left at
+     that pace, and then take as long as such tasks took (the median). A task
+     that waits for another one to finish is not in the queue yet, and is
+     taken to join it at the end.
+   - A chunk, of any browser, takes about as long as the same chunk took in
+     its latest runs, because it runs the same tests every time: on
+     2026-10-23, 24 and 25, Firefox Android's testharness-25 took 160, 155
+     and 154 minutes, and its testharness-10 70, 69 and 69, while its chunks
+     took from 22 to 160 minutes. So one typical time for all the chunks of
+     a browser would be far off. Only its latest runs count, because the
+     tests in a chunk change: that same testharness-25 took 57 to 61 minutes
+     until 2026-09-23, and 142 to 169 from the next day on. So a chunk takes
+     the median of its last 7 runs of the last 14 days, which is a week of
+     nightly runs, and the last two of the stable and beta ones. The cache
+     keeps how long each chunk of every browser took on each commit of the
+     window, by browser and channel and then by suite and number, about 12
+     KB a commit; that is only for the script, and none of it goes into
+     `dashboard.json`. A chunk that never
+     finished before takes about as long as the finished chunks of its
+     browser and channel on the same commit, or as the commit's finished
+     chunks in general.
+   - Browsers, channels and chunks come and go in WPT's CI, so the history
+     only matches a chunk with earlier runs of the same chunk of the same
+     split: "testharness-5 of 30", from the task's description ("chunk
+     number 5 of 30"), not "testharness-5", which would run other tests if
+     the suite were split into 20. A new browser, or a suite split anew,
+     starts without history and falls back as above, and a browser that is
+     gone simply stops being looked up, until its runs leave the window.
+   - A running task that has already run for a while can only be one of the
+     longer ones, so it takes as long as the finished tasks of its kind that
+     took longer than it has run so far (their median), and if none did, it
+     should end any moment now. The median of all of them would be wrong for
+     the tasks that are left, because the ones that finish first are the
+     short ones: on 2026-10-26, Firefox Android chunks that had run for 81
+     minutes were taken as done by the median of 48, while the ones that
+     took longer than 81 took a median of 99. So the times are kept as
+     lists, not only their median.
+   - A running cell gets an `estimate` for its chunks, and while the suite is
+     not finished the row gets a `suite_estimate` for every unfinished task
+     of the commit, of every browser, because the suite waits for all of
+     them. For example
+     `{"running": 24, "pending": 63, "unscheduled": 0, "position": 158, "queue_length": 255, "tasks_per_hour": 120, "expected_finish": "2026-10-27T00:10:00Z", "unknown": null}`.
+     Without the queue, its pace or a duration there is no time, and
+     `unknown` says which was missing (`queue`, `pace` or `durations`). The
+     pace changes with what runs, so the page says "around".
+   - A decision task waits in the same queue as the tasks it creates: over
+     45 of them on 2026-10-26, it waited a median of 71 minutes for a machine
+     (90% within 8 hours, and up to almost 15), and then ran for 2 (at most
+     9). So a cell that is still scheduling gets an `estimate` for the
+     commit's unfinished decision tasks, like a running one, and its chunks
+     are created when they finish. A commit has only one to three decision
+     tasks, too few to say how long one takes, so their times are pooled over
+     every commit in the window. For the same reason, short tasks like these
+     do not count in the commit's general time, the fallback for chunks of a
+     kind with too few finished.
+   - Once wpt.fyi has received a batch with our run, the run should be ready
+     when wpt.fyi has gone through the whole batch, at the pace it has gone
+     through it so far: the uploads of a batch have their stage in
+     `/api/status` from the start, `WPTFYI_RECEIVED` and `WPTFYI_PROCESSING`
+     until they are done, so the script counts how many it has processed.
+     On 2026-10-27 it had processed 8 of 15 in the hour since it received
+     them, so the rest should be ready 52 minutes later. That pace counts
+     the uploads of other commits that its processor takes meanwhile, 40 in
+     all that night, and our run is one of the batch, so it may be ready
+     sooner. wpt.fyi does not take the uploads in the order they arrived:
+     that night Safari uploads were done a minute after they came, while one
+     of ours waited from 01:17 to past 03:00 before it was even started. So
+     the estimate is only a guide: checked every 5 minutes, it moved between
+     03:02 and 03:26, and our last run was ready at 03:12. A later batch can
+     also bring the run sooner: the suite completed again at 02:34, when the
+     retried task finished, and the beta run of WPE came on wpt.fyi from that
+     batch at 02:55, while its upload of the first one was still waiting;
+     that one ends as `DUPLICATE`. The cell turns green as soon as the run is
+     on wpt.fyi, whichever batch brought it. The cell shows that progress,
+     and the estimate gets `batch_uploads` and `batch_processed`.
+   - Until wpt.fyi has processed any of the batch, there is no pace yet, so
+     the run should be ready as long after wpt.fyi received it as our runs
+     took (the median of `updated` minus `created` of
+     the processed uploads in `/api/status`, which the cache keeps from when
+     it started). That is counted apart for commits with a weekly tag,
+     because those send wpt.fyi the stable and beta runs of every browser
+     too, about 15 uploads at once instead of about 7, and its processor
+     takes them a few at a time: on 2026-10-27 our two stable runs were
+     ready 22 and 27 minutes after it received them, and the nightly and
+     beta ones were still waiting an hour later. With fewer than 5 such
+     times, a daily commit uses how long after its suite finished its run
+     appeared instead (the median; on 2026-10-26, 23 minutes over 66 daily
+     runs), which is reliable because its suite rarely opens again, while a
+     weekly commit has no estimate, rather than a daily one known to be too
+     short. An uploading cell gets, for example,
+     `"estimate": {"expected_finish": "2026-10-27T01:44:00Z", "upload_seconds": 1620, "uploads": 6, "measured": "received", "weekly": true, "unknown": null}`.
+   - The page shows how long is left in the headline of each cell with an
+     estimate, and the time in its details. Once that time has passed, it
+     says "should be done by now" instead of counting on, because only the
+     next update can say whether it is. A cell that waits without an
+     estimate says "no ETA" there, with the reason in its tooltip.
 
 ## State of each cell (one browser and channel, for one tag)
 
@@ -492,14 +606,14 @@ a run that is on wpt.fyi is green whatever else happened:
 |---|---|
 | on wpt.fyi | green: WebKit version, run link, diff against the previous run |
 | the commit could not be read, and there is no earlier data for it | yellow: could not read this commit |
-| a decision task is still running, and chunks are missing or there are none yet | yellow: scheduling tasks |
+| a decision task is still running, and chunks are missing or there are none yet | yellow: scheduling tasks, where the decision task is in the queue, and when it should have created them |
 | no tasks for this browser and channel, none expected from the other port, and a decision task failed | red: decision task failed |
 | no tasks for this browser and channel, and none expected from the other port | grey: "no run" |
-| chunks unscheduled, pending or running | yellow: running (completed/expected), and while chunks wait for a machine, where the last one is in the queue and when the run should finish |
+| chunks unscheduled, pending or running | yellow: running (completed/expected), where the last waiting chunk is in the queue, and when the run should finish |
 | any chunk `failed` / `exception`, or missing | red: the failed and missing chunks, with links (see below) |
-| our chunks passed, the suite is not finished | yellow: waiting for the suite to finish |
+| our chunks passed, the suite is not finished | yellow: waiting for the suite to finish, how many tasks of the commit are left, and when the suite should finish |
 | our chunks passed, the suite is still not finished 48 hours later | red: suite never finished |
-| suite finished, not on wpt.fyi, within the grace period | yellow: uploading |
+| wpt.fyi received a batch of the commit's runs after our last chunk finished, or the suite finished, and the run is not on wpt.fyi, within the grace period | yellow: uploading, and when the run should be on wpt.fyi |
 | grace period over, not in a list of wpt.fyi runs that could not be refreshed | yellow: wpt.fyi not checked |
 | grace period over, still not on wpt.fyi | red: not uploaded, with a reason if one can be found (see below) |
 
@@ -514,7 +628,30 @@ as `exception`, and a running task is killed after its `maxRunTime` of 2 or 4
 hours. So the 48-hour state only covers the rare case where GitHub never
 records the suite as finished.
 
-The grace period is 7 hours after the suite finished. Because the script runs
+A suite can complete before every task has finished, because a retried
+task has no check run while it waits for a machine: GitHub only creates one
+when the run starts. So the suite completes when every check run that exists
+has finished, wpt.fyi takes its runs, and the suite opens again when the
+retry starts; on 2026-10-27 that lasted from 01:16 to 01:40, and the commit
+of 2026-10-03 went through it five times. Its finish time can then come
+after the runs reached wpt.fyi, by up to 102 minutes on the weekly commits
+of 10-05 and 10-12, and while it is open the cells would say that they wait
+for the suite, although wpt.fyi already has them.
+
+So the script keeps when wpt.fyi received each batch of a commit's runs.
+When the suite completes, wpt.fyi's webhook creates one upload for every run
+whose checks all passed, at once (`ExtractArtifactURLs` and `CreateAllRuns`
+in `api/taskcluster/webhook.go`), and on 2026-10-27 it created 15 within a
+second, one for each such run. An upload only gets its browser name once it
+is processed, which can take over an hour, but from the start it has the
+commit and the uploader, `taskcluster`. So a batch that arrived after our
+last chunk finished, when all our chunks passed, has our run in it, and the
+cell is uploading from then, whatever the suite says now. `/api/status` only
+covers about a day, so the cache keeps these times, one per batch, for the
+commits in the window.
+
+The grace period is 7 hours after wpt.fyi received the run, or after the
+suite finished when no batch was seen. Because the script runs
 every hour, that means some six runs of the script have looked for the run on
 wpt.fyi before the cell turns red, so a slow upload is never reported as a
 failure. In the cases measured, the run appeared on wpt.fyi 26 to 70 minutes
@@ -523,13 +660,13 @@ hours after the suite finished.
 
 When a run is not uploaded, the cell tries to explain why:
 
-- if the suite has more check runs than wpt.fyi can list, it points to the
-  known wpt.fyi bug. That limit is 500 today, and it is a single constant in
-  the script (`check_run_limit` in `states.Settings`), so it can be changed
-  when wpt.fyi deploys a fix. However, the reason is worked out again on every
-  run, so after that change the older runs that did hit the limit would say
-  "cause unknown" instead; keeping the limit that applied on each date would
-  fix that;
+- if the suite has more check runs than wpt.fyi could list when the suite
+  finished, it points to that limit. It was 500 until wpt.fyi#5127 raised it
+  to 2000; that was merged on 2026-10-01 at 18:27 UTC, and since the time it
+  reached the server is not known, the script takes it to be two days later
+  (`check_run_limits` in `states.Settings`). The reason is worked out again
+  on every run, so keeping the limit that applied on each date is what lets
+  the older runs that did hit it still say so;
 - if the saved `/api/status` entries have one for the run that wpt.fyi did not
   accept, it shows the stage and the error of the latest one. A `VALID` entry
   is not shown as a reason, since it means the upload was accepted. These
@@ -930,7 +1067,7 @@ cannot shift the cells of the other days.
   "errors": ["…"],
   "warnings": ["…"],
   "settings": {"max_age_days": 60, "stale_after_hours": 3, "update_every_minutes": 60, "upload_grace_hours": 7,
-               "suite_timeout_hours": 48, "check_run_limit": 500},
+               "suite_timeout_hours": 48, "check_run_limits": [[null, 500], ["2026-10-03T18:27:00Z", 2000]]},
   "ports": [{"key": "wpe", "label": "WPE WebKit", "product": "wpewebkit",
              "builder": "WPE-Linux-64bit-Release-Packaging-Nightly", "site": "wpewebkit.org"}, "…"],
   "builds": {
@@ -966,7 +1103,7 @@ cannot shift the cells of the other days.
                        "slowest": {"name": "…", "task_id": "…", "seconds": 3483, "task_url": "…"},
                        "version": "2.55.0 (321964@main)", "version_source": "<taskId>/<runId>",
                        "version_read_failed": false, "version_failures": 0,
-                       "task_queue": "proj-wpt/ci-gw", "task_group_id": "…", "task_group_url": "…"},
+                       "running": 0, "pending": 0, "task_group_id": "…", "task_group_url": "…"},
             "wptfyi": {
               "run_id": 5193370485129216, "time_start": "…", "created_at": "…",
               "browser_version": "2.55.0 (321964@main)", "identifier": "321964@main",
@@ -993,8 +1130,13 @@ The other states carry what explains them:
 - `failed`: each failed chunk in `chunks.failed`, with `name`, `state`,
   `reason`, `task_url`, `log_url` and `github_url`, and the missing ones in
   `chunks.missing`;
-- `uploading`: `since`, when the suite finished, and `red_at`, when the cell
-  turns red;
+- `running` and `scheduling`: `estimate`, when the run or the decision tasks
+  should finish (see step 8 of the data flow), and the row gets a
+  `suite_estimate` while its suite is not finished;
+- `uploading`: `since`, when wpt.fyi received the run, or when the suite
+  finished if no batch was seen, `received`, which says which of the two,
+  `red_at`, when the cell turns red, and `estimate`, when the run should be
+  on wpt.fyi;
 - `not_uploaded`: `since` and `reason`, which is `check_run_limit` (with
   `check_runs` and `limit`), `wptfyi_status` (with the saved `entries`) or
   `unknown`;
@@ -1059,19 +1201,28 @@ So most runs of the script only need a handful of requests.
 ## Known wpt.fyi upload bug (as of 2026-09-29)
 
 wpt.fyi's Taskcluster webhook lists the check runs of the finished check suite
-25 at a time. It gives up after 20 pages, with the error "more than 500
-CheckRuns returned for CheckSuite", so nothing from that suite is imported
+25 at a time. It gave up after 20 pages, with the error "more than 500
+CheckRuns returned for CheckSuite", so nothing from that suite was imported
 (`api/taskcluster/webhook.go`, `ListCheckRuns`).
 
 Since WPT commit `ac3c70021a6` (2026-04-15) added test262 chunks to
 Taskcluster, every commit with a weekly tag has more than 500 check runs. So:
 
-- stable and beta have not reached wpt.fyi since 2026-04-13 (the 04-13 suite
-  had 454 check runs; the 04-20 suite had 590);
+- stable and beta did not reach wpt.fyi from 2026-04-13 until the fix
+  (the 04-13 suite had 454 check runs; the 04-20 suite had 590);
 - nightly is also lost when a daily and a weekly tag share a commit (09-21,
   09-28).
 
-Upstream PR web-platform-tests/wpt.fyi#5127 raises the limit to 1000.
+Upstream PR web-platform-tests/wpt.fyi#5127 fixed it: since it was merged on
+2026-10-01, the webhook lists 100 check runs a page, so up to 2000. It is
+deployed on the server, at a time that is not known.
+
+Since then, a suite can still complete early, while a retried task waits for
+a machine, and wpt.fyi then imports every run that has passed by then, as
+described under "State of each cell". Its processor then takes a while with
+the 15 or so runs of a commit with a weekly tag: on 2026-10-27 the nightly
+and beta runs were still waiting an hour after it received them, without a
+browser name in `/api/status` yet.
 
 Separately, webkitgtk nightly on 09-27 was not uploaded, even though that suite
 had only 412 check runs and all its chunks passed. The cause is not known yet.
@@ -1089,20 +1240,28 @@ The settings are constants at the top of the files:
   `FINAL_AFTER_SUITE_HOURS` 24, `FINAL_AFTER_TAG_HOURS` 72,
   `DECISION_DEADLINE_HOURS` 24,
   `FIRST_BUILD_FETCH` 70, `BUILD_FETCH` 10 and `CHECK_RUN_LOOKUPS` 8;
+- `update_dashboard.py`: `TASK_QUEUE` "proj-wpt/ci-gw", the queue that every
+  WPT task waits in, and `BATCH_SPREAD` 1 minute, within which wpt.fyi's
+  uploads count as one batch;
 - `states.py` (`Settings`): `upload_grace_hours` 7, `suite_timeout_hours` 48
-  and `check_run_limit` 500;
+  and `check_run_limits` 500, then 2000 from 2026-10-03;
+- `states.py`, for the estimates: `QUEUE_PACE_MIN_WINDOW` 10 minutes,
+  `BUSY_PACE_MAX_AGE` 6 hours, `MIN_FINISHED_OF_KIND` 5,
+  `MIN_UPLOADS_FOR_ESTIMATE` 5, `HISTORY_RUNS` 7 and `HISTORY_AGE` 14 days;
 - `fetch.py`: 3 attempts, 10 and 30 seconds between them, 90-second timeout;
 - `logs.py`: 30 days on the web, 90 days in total;
-- `dashboard.js`: the first check for new data a minute after an update is
-  due, then every minute for 30 minutes, then every 5 minutes; an update
-  called late 5 minutes after it was due; 3, 4 and 2 rows at first, 3 more per
+- `dashboard.js`: the first check for new data 15 seconds after an update is
+  due, by the server's clock, then every 10 seconds until 2 minutes, every
+  30 seconds until 5, every minute until 10, and every 5 minutes after that;
+  the log checked on its own from 2 minutes; an update called late 5 minutes
+  after it was due; 3, 4 and 2 rows at first, 3 more per
   click, the warning above 14 days between runs, and 08:00 UTC as the hour
   after which today's daily tag should exist.
 
 Notes and later work:
 
-- `MAX_AGE_DAYS` is 60. For stable and beta, the latest runs on wpt.fyi are
-  from 2026-04-13, so the first stable and beta runs after the upload bug is
-  fixed will show no diff, and the ones after that will.
+- `MAX_AGE_DAYS` is 60. The stable and beta runs that reached wpt.fyi after
+  the upload bug was fixed had no earlier run in the window to compare with,
+  so they show no diff, and the ones after them do.
 - Later: marking flaky tests, by looking at each test's history over several
   runs.

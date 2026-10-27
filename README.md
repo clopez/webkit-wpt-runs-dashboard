@@ -69,7 +69,7 @@ GITHUB_TOKEN=$(cat ~/.config/webkit-wpt-runs-dashboard/github-token) \
 It writes `html/data/dashboard.json` for the page, one file per diff in
 `html/data/diffs/`, and its log in `html/data/cron_helper.log.txt`. It also
 keeps a cache in `cron_helper/cache/`, and the log lines older than 30 days in
-`cron_helper/logs/`. None of these are in git. Later runs take about 10
+`cron_helper/logs/`. None of these are in git. Later runs take about 40
 seconds.
 
 ### 3. The cron job

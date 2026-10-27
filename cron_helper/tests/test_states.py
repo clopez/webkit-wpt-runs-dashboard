@@ -8,9 +8,10 @@ SETTINGS = states.Settings()
 
 
 def task(name, state="completed", chunk_of=None, runs=None, group="groupA", task_id=None):
-    number = int(name.rsplit("-", 1)[1])
-    suite = name.rsplit("-", 2)[1]
-    description = f'A subset of WPT\'s "{suite}" tests (chunk number {number} of {chunk_of}), run in the nightly release.' if chunk_of else "Some task."
+    description = "Some task."
+    if chunk_of:
+        number, suite = int(name.rsplit("-", 1)[1]), name.rsplit("-", 2)[1]
+        description = f'A subset of WPT\'s "{suite}" tests (chunk number {number} of {chunk_of}), run in the nightly release.'
     return {
         "task": {"metadata": {"name": name, "description": description}},
         "status": {"taskId": task_id or f"id-{name}", "taskGroupId": group, "state": state,
@@ -98,33 +99,12 @@ class ChunksTest(unittest.TestCase):
         run = {"runId": 0, "state": state, "scheduled": scheduled, "started": started}
         return states.parse_task(task(name, state=state, chunk_of=33, runs=[run], group=group))
 
-    def test_the_summary_counts_running_and_waiting_chunks_and_when_the_last_waiting_one_was_queued(self):
+    def test_the_summary_counts_running_and_waiting_chunks(self):
         chunks = [self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-1", "pending", "2026-09-29T12:40:01Z"),
                   self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-2", "pending", "2026-09-29T12:40:03Z"),
                   self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-3", "running", "2026-09-29T12:40:02Z", "2026-09-29T13:00:00Z")]
         summary = states.summarize_chunks(chunks)
-        self.assertEqual((summary["running"], summary["pending"], summary["pending_last_scheduled"]), (1, 2, "2026-09-29T12:40:03Z"))
-
-    def test_the_position_counts_the_push_s_waiting_tasks_of_every_browser_queued_before_the_last_chunk(self):
-        now = datetime.datetime(2026, 9, 29, 14, 0, tzinfo=datetime.timezone.utc)
-        push = [self.queued("wpt-chrome-stable-testharness-1", "pending", "2026-09-29T12:40:01Z"),
-                self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-1", "pending", "2026-09-29T12:40:02Z"),
-                self.queued("wpt-firefox-beta-testharness-1", "pending", "2026-09-29T12:40:03Z"),
-                self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-2", "pending", "2026-09-29T12:40:04Z"),
-                self.queued("wpt-chrome-stable-testharness-2", "pending", "2026-09-29T12:40:05Z")]
-        # 30 tasks of the push started in the half hour since its group's first one did, so 60 an hour.
-        push += [self.queued(f"wpt-chrome-stable-reftest-{number}", "completed", "2026-09-29T12:40:00Z", "2026-09-29T13:30:00Z") for number in range(30)]
-        summary = states.summarize_chunks([chunk for chunk in push if chunk["browser"] == "wpewebkit_minibrowser"])
-        estimate = states.queue_position(summary, states.push_queue(push, now), now)
-        self.assertEqual(estimate, {"pending": 2, "position": 4, "tasks_per_hour": 60})
-
-    def test_the_position_is_unknown_until_a_task_of_the_cell_s_own_group_has_started(self):
-        now = datetime.datetime(2026, 9, 29, 14, 0, tzinfo=datetime.timezone.utc)
-        push = [self.queued("wpt-wpewebkit_minibrowser-nightly-reftest-1", "pending", "2026-09-29T12:40:02Z"),
-                # A task of another group of the same commit, queued hours before, says nothing about what is ahead of ours.
-                self.queued("wpt-chrome-canary-reftest-1", "completed", "2026-09-29T09:28:00Z", "2026-09-29T13:30:00Z", group="groupB")]
-        summary = states.summarize_chunks(push[:1])
-        self.assertEqual(states.queue_position(summary, states.push_queue(push, now), now), {"pending": 1, "position": None, "tasks_per_hour": None})
+        self.assertEqual((summary["running"], summary["pending"]), (1, 2))
 
     def test_a_time_without_a_zone_is_taken_as_utc(self):
         self.assertEqual(states.parse_time("2026-09-27T06:00:00"), states.parse_time("2026-09-27T06:00:00Z"))
@@ -156,8 +136,9 @@ class ChunksTest(unittest.TestCase):
 
 
 class DecideStateTest(unittest.TestCase):
-    def decide(self, chunks=None, suite_data=None, uploaded=False, now=NOW, entries=(), decision_failed=False):
-        return states.decide_state(chunks, suite_data, uploaded, now, SETTINGS, status_entries=entries, decision_failed=decision_failed)
+    def decide(self, chunks=None, suite_data=None, uploaded=False, now=NOW, entries=(), decision_failed=False, received_at=None):
+        return states.decide_state(chunks, suite_data, uploaded, now, SETTINGS, status_entries=entries, decision_failed=decision_failed,
+                                   received_at=received_at)
 
     def test_a_run_on_wptfyi_is_green_whatever_else_happened(self):
         self.assertEqual(self.decide(chunks_summary(failed=[{"name": "x"}]), suite(), uploaded=True)["state"], "uploaded")
@@ -189,6 +170,33 @@ class DecideStateTest(unittest.TestCase):
         cell = self.decide(chunks_summary(), suite(updated_at="2026-09-28T12:00:00Z", check_runs=614), entries=[{"stage": "INVALID"}])
         self.assertEqual(cell["reason"], {"kind": "check_run_limit", "check_runs": 614, "limit": 500})
 
+    def test_wptfyi_batches_group_the_uploads_created_together_and_count_the_processed_ones(self):
+        spread = datetime.timedelta(minutes=1)
+        uploads = [("2026-10-27T01:17:03.586Z", False), ("2026-10-27T01:17:03.594Z", True), ("2026-10-27T01:17:03.661Z", True),
+                   ("2026-10-27T03:02:00Z", True), ("2026-10-27T03:02:00.010Z", None)]
+        # A batch that has left wpt.fyi's list keeps what was known of it.
+        previous = [{"at": "2026-10-26T13:40:38Z", "uploads": 8, "processed": 8}]
+        self.assertEqual(states.upload_batches(previous, uploads, spread),
+                         [{"at": "2026-10-26T13:40:38Z", "uploads": 8, "processed": 8},
+                          {"at": "2026-10-27T01:17:03.586Z", "uploads": 3, "processed": 1},
+                          {"at": "2026-10-27T03:02:00Z", "uploads": 1, "processed": 0}])
+        # An upload known only from the rejected ones says when a batch came, not how big it was.
+        self.assertEqual(states.upload_batches([], [("2026-10-01T13:21:36Z", None)], spread), [{"at": "2026-10-01T13:21:36Z", "uploads": None, "processed": None}])
+
+    def test_a_run_that_wptfyi_received_is_uploading_whatever_the_suite_says(self):
+        cell = self.decide(chunks_summary(), suite(status="in_progress", updated_at="2026-09-29T11:40:00Z"), received_at="2026-09-29T11:17:03Z")
+        self.assertEqual((cell["state"], cell["since"], cell["received"]), ("uploading", "2026-09-29T11:17:03Z", True))
+        # The grace period counts from when wpt.fyi received it.
+        self.assertEqual(cell["red_at"], "2026-09-29T18:17:03+00:00")
+
+    def test_the_check_run_limit_is_the_one_wptfyi_had_when_the_suite_finished(self):
+        # wpt.fyi could list 2000 check runs from 2026-10-03 on, so 638 is no reason any more.
+        now = datetime.datetime(2026, 10, 27, 12, 0, tzinfo=datetime.timezone.utc)
+        late = states.decide_state(chunks_summary(), suite(updated_at="2026-10-27T01:16:53Z", check_runs=638), False, now, SETTINGS)
+        self.assertEqual(late["reason"], {"kind": "unknown"})
+        too_many = states.decide_state(chunks_summary(), suite(updated_at="2026-10-27T01:16:53Z", check_runs=2100), False, now, SETTINGS)
+        self.assertEqual(too_many["reason"], {"kind": "check_run_limit", "check_runs": 2100, "limit": 2000})
+
     def test_a_missing_upload_is_not_confirmed_when_wptfyi_could_not_be_checked(self):
         cell = states.decide_state(chunks_summary(), suite(updated_at="2026-09-28T12:00:00Z"), False, NOW, SETTINGS, wptfyi_checked=False)
         self.assertEqual((cell["state"], cell["color"]), ("wptfyi_unchecked", "yellow"))
@@ -210,3 +218,125 @@ class DecideStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def brief(name, state, started=None, resolved=None, group="groupA", queue="proj-wpt/ci-gw", task_id=None, run_id=0, chunk_of=None):
+    entry = task(name, state=state, chunk_of=chunk_of, runs=[{"runId": run_id, "state": state, "started": started, "resolved": resolved}],
+                 group=group, task_id=task_id)
+    entry["task"]["taskQueueId"] = queue
+    return states.task_brief(entry)
+
+
+class EstimateTest(unittest.TestCase):
+    def test_every_task_of_a_push_is_kept_with_its_kind_and_the_finished_ones_give_the_time_of_their_kind(self):
+        tasks = [brief(f"wpt-firefox-beta-testharness-{number}", "completed", "2026-09-29T10:00:00Z", f"2026-09-29T10:{minutes}:00Z")
+                 for number, minutes in enumerate((50, 20, 40, 30, 10), 1)]
+        # Too few Chrome tasks have finished to say how long they take, but they still count for the commit as a whole.
+        tasks += [brief("wpt-chrome-stable-reftest-1", "completed", "2026-09-29T10:00:00Z", "2026-09-29T11:00:00Z"),
+                  brief("wpt-firefox-beta-reftest-1", "pending"),
+                  brief("download-firefox-beta-1", "running", "2026-09-29T11:00:00Z")]
+        tasks.append(brief("wpt-decision-task", "completed", "2026-09-29T09:00:00Z", "2026-09-29T09:02:00Z"))
+        progress = states.commit_progress(tasks)
+        self.assertEqual(progress["seconds_by_kind"], {"firefox-beta": [10 * 60, 20 * 60, 30 * 60, 40 * 60, 50 * 60]})
+        # Kept even alone, to be pooled with the decision tasks of the other commits.
+        self.assertEqual(progress["decision_seconds"], [2 * 60])
+        self.assertEqual(progress["chunk_seconds"], [minutes * 60 for minutes in (10, 20, 30, 40, 50, 60)])
+        self.assertEqual(progress["chunk_history"], {"firefox-beta": {f"testharness-{number}": minutes * 60 for number, minutes in enumerate((50, 20, 40, 30, 10), 1)},
+                                                     "chrome-stable": {"reftest-1": 60 * 60}})
+        self.assertEqual([(task["name"], task["kind"], task["state"]) for task in progress["unfinished"]],
+                         [("wpt-firefox-beta-reftest-1", "firefox-beta", "pending"), ("download-firefox-beta-1", "download-firefox-beta-1", "running")])
+
+    def test_each_chunk_takes_its_own_times_from_its_latest_runs(self):
+        # One run a day, newest first: the chunk got longer when tests were added to it, and only its latest runs say so.
+        minutes = [155, 158, 154, 160, 154, 155, 157, 146, 145, 58, 57]
+        dated = [(NOW - datetime.timedelta(days=day), {"progress": {"chunk_history": {"firefox_android-nightly": {"testharness-25": run * 60, "testharness-2": 2400}}}})
+                 for day, run in enumerate(minutes)]
+        dated.append((NOW, {"progress": {"unfinished": [], "decision_seconds": [120]}}))
+        # The order they come in does not matter.
+        history = states.chunk_history(reversed(dated), NOW)
+        self.assertEqual(history["wpt-firefox_android-nightly-testharness-25"], sorted(run * 60 for run in minutes[:states.HISTORY_RUNS]))
+        self.assertEqual(history["wpt-firefox_android-nightly-testharness-2"], [2400] * states.HISTORY_RUNS)
+
+    def test_a_chunk_that_runs_once_a_week_only_takes_its_runs_of_the_last_two_weeks(self):
+        weekly = [(NOW - datetime.timedelta(weeks=week), {"progress": {"chunk_history": {"webkitgtk_minibrowser-stable": {"test262-5-of-8": seconds}}}})
+                  for week, seconds in enumerate((2400, 2700, 9000, 9000))]
+        self.assertEqual(states.chunk_history(weekly, NOW), {"wpt-webkitgtk_minibrowser-stable-test262-5-of-8": [2400, 2700]})
+        self.assertEqual(states.chunk_history(weekly[3:], NOW), {})
+
+    def test_a_suite_split_into_another_number_of_chunks_starts_a_new_history(self):
+        # Chunk 5 of 20 and chunk 5 of 30 run different tests, so the times of one say nothing about the other.
+        before = brief("wpt-firefox-beta-testharness-5", "completed", "2026-09-28T10:00:00Z", "2026-09-28T11:00:00Z", chunk_of=20)
+        now = brief("wpt-firefox-beta-testharness-5", "running", "2026-09-29T11:30:00Z", chunk_of=30)
+        self.assertEqual(states.chunk_history([(NOW, {"progress": states.commit_progress([before])})], NOW), {"wpt-firefox-beta-testharness-5-of-20": [3600]})
+        self.assertEqual(now["history_key"], "wpt-firefox-beta-testharness-5-of-30")
+        # Tasks that are not chunks keep their name, so the decision tasks still find their times.
+        self.assertEqual(brief("wpt-decision-task", "completed")["history_key"], "wpt-decision-task")
+
+    def test_a_task_of_an_older_kind_names_its_queue_by_provisioner_and_worker_type(self):
+        self.assertEqual(states.task_queue_of({"provisionerId": "proj-wpt", "workerType": "ci-gw"}), "proj-wpt/ci-gw")
+
+    def test_the_pace_counts_the_tasks_that_were_ahead_of_the_current_head(self):
+        an_hour_ago = {"at": "2026-09-29T11:00:00Z", "tasks": ["a/0", "b/0", "c/0", "d/0"]}
+        self.assertEqual(states.queue_pace(an_hour_ago, "c/0", NOW), (2, None, True))
+        # A queue that did not move is stuck, which an old pace must not hide.
+        self.assertEqual(states.queue_pace({**an_hour_ago, "busy_pace": {"at": "2026-09-29T11:00:00Z", "tasks_per_hour": 150}}, "a/0", NOW),
+                         (None, "stuck", False))
+        self.assertEqual(states.queue_pace({}, "a/0", NOW), (None, "pace", False))
+        # A view from the future, as after the clock was set back, measures nothing.
+        self.assertEqual(states.queue_pace({**an_hour_ago, "at": "2026-09-29T13:00:00Z"}, "c/0", NOW), (None, "pace", False))
+
+    def test_a_queue_that_ran_dry_takes_the_last_busy_pace_if_it_is_recent(self):
+        # All 4 left, and maybe many more, so 4 an hour is only a lower bound.
+        ran_dry = {"at": "2026-09-29T11:00:00Z", "tasks": ["a/0", "b/0", "c/0", "d/0"], "busy_pace": {"at": "2026-09-29T07:00:00Z", "tasks_per_hour": 150}}
+        self.assertEqual(states.queue_pace(ran_dry, "z/0", NOW), (150, None, False))
+        self.assertEqual(states.queue_pace({**ran_dry, "tasks": []}, None, NOW), (150, None, False))
+        too_old = {**ran_dry, "busy_pace": {"at": "2026-09-29T05:00:00Z", "tasks_per_hour": 150}}
+        self.assertEqual(states.queue_pace(too_old, "z/0", NOW), (None, "pace", False))
+        self.assertEqual(states.queue_pace({**ran_dry, "busy_pace": None}, None, NOW), (None, "pace", False))
+
+    def queue(self, positions, length=100, tasks_per_hour=60):
+        return {"id": "proj-wpt/ci-gw", "positions": positions, "length": length, "tasks_per_hour": tasks_per_hour}
+
+    def test_running_tasks_finish_after_their_usual_time_and_waiting_ones_after_the_tasks_ahead_of_them(self):
+        tasks = [brief("wpt-firefox-beta-reftest-1", "running", "2026-09-29T11:50:00Z"),
+                 brief("wpt-firefox-beta-reftest-2", "pending", task_id="t2"),
+                 brief("wpt-firefox-beta-reftest-3", "pending", task_id="t3")]
+        estimate = states.finish_estimate(tasks, self.queue({"t2/0": 10, "t3/0": 30}), lambda task: [30 * 60], NOW)
+        # The last waiting one starts when the 30 tasks ahead of it have left at 60 an hour, and then takes 30 minutes.
+        self.assertEqual(estimate, {"running": 1, "pending": 2, "unscheduled": 0, "position": 30, "queue_length": 100, "tasks_per_hour": 60,
+                                    "expected_finish": "2026-09-29T13:00:00Z", "unknown": None})
+
+    def test_a_running_task_past_its_usual_time_should_finish_any_moment_now(self):
+        tasks = [brief("wpt-firefox-beta-reftest-1", "running", "2026-09-29T10:00:00Z")]
+        self.assertEqual(states.finish_estimate(tasks, None, lambda task: [30 * 60], NOW)["expected_finish"], "2026-09-29T12:00:00Z")
+
+    def test_a_task_that_has_run_for_a_while_takes_as_long_as_the_finished_ones_that_took_longer(self):
+        # The Android chunks of 2026-10-26: the first to finish took 20 to 48 minutes, so their median said done while some ran on for 70.
+        finished = [minutes * 60 for minutes in (20, 35, 48, 80, 100)]
+        tasks = [brief("wpt-firefox_android-stable-testharness-2", "running", "2026-09-29T10:50:00Z")]
+        self.assertEqual(states.finish_estimate(tasks, None, lambda task: finished, NOW)["expected_finish"], "2026-09-29T12:30:00Z")
+        self.assertEqual(states.expected_seconds(finished), 48 * 60)
+        self.assertEqual(states.expected_seconds(finished, 70 * 60), 100 * 60)
+
+    def test_a_waiting_task_no_longer_in_the_queue_has_started_and_one_waiting_for_another_task_joins_the_end(self):
+        started = states.finish_estimate([brief("wpt-firefox-beta-reftest-1", "pending")], self.queue({}), lambda task: [60 * 60], NOW)
+        self.assertEqual((started["position"], started["expected_finish"]), (None, "2026-09-29T13:00:00Z"))
+        later = states.finish_estimate([brief("wpt-firefox-beta-reftest-1", "unscheduled")], self.queue({}, length=59), lambda task: [60 * 60], NOW)
+        self.assertEqual((later["unscheduled"], later["expected_finish"]), (1, "2026-09-29T14:00:00Z"))
+
+    def test_without_the_queue_its_pace_or_the_durations_there_is_no_time_and_the_estimate_says_why(self):
+        waiting = [brief("wpt-firefox-beta-reftest-1", "pending", task_id="t1")]
+        self.assertEqual(states.finish_estimate(waiting, None, lambda task: [60], NOW)["unknown"], "queue")
+        self.assertEqual(states.finish_estimate([brief("wpt-firefox-beta-reftest-1", "pending", queue="other/queue")], self.queue({}),
+                                                lambda task: [60], NOW)["unknown"], "queue")
+        no_pace = states.finish_estimate(waiting, self.queue({"t1/0": 7}, tasks_per_hour=None), lambda task: [60], NOW)
+        self.assertEqual((no_pace["unknown"], no_pace["position"], no_pace["expected_finish"]), ("pace", 7, None))
+        self.assertEqual(states.finish_estimate(waiting, self.queue({"t1/0": 7}), lambda task: None, NOW)["unknown"], "durations")
+
+    def test_wptfyi_takes_the_median_time_of_the_uploads_and_a_suite_that_changed_after_its_upload_says_nothing(self):
+        def row(suite_finished, created, state="uploaded"):
+            return {"suite": suite(updated_at=suite_finished), "cells": {"gtk": {"nightly": {"state": state, "wptfyi": {"created_at": created}}}}}
+        rows = [row("2026-09-29T08:00:00Z", f"2026-09-29T08:{minutes}:00Z") for minutes in (10, 20, 30, 40, 50)]
+        rows.append(row("2026-09-30T08:00:00Z", "2026-09-29T08:10:00Z"))
+        self.assertEqual(states.upload_delay(rows), (30 * 60, 5))
+        self.assertEqual(states.upload_delay(rows[:4]), (None, 4))

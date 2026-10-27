@@ -471,15 +471,20 @@ function taskGroupLink(chunks) {
   return chunks?.task_group_url ? link(chunks.task_group_url, "Taskcluster tasks") : null;
 }
 
+// Without a suite there are no checks to list yet, so the commit itself.
+function githubChecksUrl(row) {
+  return row.suite ? `${GITHUB_REPO}/commit/${row.sha}/checks?check_suite_id=${row.suite.id}` : `${GITHUB_REPO}/commit/${row.sha}`;
+}
+
 function githubChecksLink(row) {
   if (!row.suite) return null;
-  return link(`${GITHUB_REPO}/commit/${row.sha}/checks?check_suite_id=${row.suite.id}`, "All GitHub checks of this commit", null,
-    "Every check of this commit on GitHub, for all the browsers and channels that ran on it, not only this one");
+  return link(githubChecksUrl(row), "All GitHub checks of this WPT commit", null,
+    "Every check of this WPT commit on GitHub, for all the browsers and channels that ran on it, not only this one");
 }
 
 function reasonText(reason) {
   if (!reason) return null;
-  if (reason.kind === "check_run_limit") return `The suite has ${number.format(reason.check_runs)} check runs; wpt.fyi drops suites over ${number.format(reason.limit)}`;
+  if (reason.kind === "check_run_limit") return `The suite has ${number.format(reason.check_runs)} check runs; when it finished, wpt.fyi dropped suites with over ${number.format(reason.limit)}`;
   if (reason.kind === "wptfyi_status") {
     const latest = reason.entries[reason.entries.length - 1];
     return `wpt.fyi upload ${latest.stage || "?"}${latest.error ? `: ${latest.error}` : ""}`;
@@ -509,20 +514,92 @@ function outcomeText(cell) {
   return cell.state === "failed" ? failedChunksText(cell.chunks || {}) : DECIDED_WPT_STATES[cell.state];
 }
 
-// The Taskcluster queue hands tasks out in order, so once a task of the run's
-// push has started, the tasks ahead of its last chunk are the push's own ones
-// queued before it, and the time is when they should have started.
-function queueNote(queue) {
-  const waiting = `${plural(queue.pending, "chunk")} waiting for a machine`;
-  if (!queue.position)
-    return element("div", { class: "detail", title: "The queue is first come, first served, and other pushes queued before this one are still waiting" },
-      `${waiting}; none of this push's tasks has started yet, so other work is still ahead of it`);
-  const title = queue.expected_finish
-    ? `An estimate from the last update: this push's tasks were starting at ${queue.tasks_per_hour} an hour, and one of our chunks takes about ${formatSeconds(queue.seconds_per_chunk)}`
-    : "No time yet: this push's tasks only started a few minutes before the last update, too few to tell how fast the queue moves";
-  return element("div", { class: "detail", title },
-    `${waiting} (the last one is number ${number.format(queue.position)} in the Taskcluster queue)`
-    + (queue.expected_finish ? ` · expected around ${formatTime(queue.expected_finish)}` : ""));
+const UNKNOWN_ESTIMATE_REASONS = {
+  queue: "No estimate: the last update could not read the Taskcluster queue",
+  pace: "No estimate yet: the pace of the Taskcluster queue is measured between two updates, and the update before had no view of the queue to compare with, "
+    + "as after the dashboard's cache is filled again, or the queue was empty then and no pace from the last 6 hours is known",
+  stuck: "No estimate: the Taskcluster queue has not moved since the update before, so its machines may be stuck",
+  durations: "No estimate: no finished task says how long these take",
+  uploads: "No estimate: too few runs of the last weeks say how long wpt.fyi takes to create a run",
+  weekly_uploads: "No estimate yet: wpt.fyi takes longer with a commit that has a weekly tag, which sends it the stable and beta runs of every browser too, "
+    + "and too few of those runs have been processed since the dashboard started keeping how long they took",
+};
+
+// For a headline: how long is left, or that there is no estimate and why.
+function headlineEstimate(estimate) {
+  if (estimate?.expected_finish) return [" · ", countdown(estimate.expected_finish)];
+  if (estimate?.unknown) return [" · ", element("span", { class: "no-eta", title: UNKNOWN_ESTIMATE_REASONS[estimate.unknown] || "" }, "no ETA")];
+  return null;
+}
+
+function joinedList(items) {
+  return items.length > 1 ? `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}` : items[0] || "";
+}
+
+// How long until an estimated finish, by the server's clock, kept current
+// between two loads of the data by the same timer that redraws the age of
+// the data. Once the time has passed, the run has probably finished, but
+// only the next update can say, so the countdown does not count past it.
+function setCountdown(span) {
+  const left = new Date(span.dataset.until) - serverNow();
+  span.textContent = left >= 60000 ? `about ${formatAge(left)} left` : left >= 0 ? "any moment now" : "should be done by now";
+  // A late update has no due time worth giving; the header already says it is late.
+  const next = nextUpdateTime() > serverNow() ? nextUpdateTime() : null;
+  span.title = left < 0
+    ? `The last update expected this to finish at ${formatTime(span.dataset.until, { withDate: false })}; `
+      + `the next update${next ? `, due at ${formatTime(new Date(next).toISOString(), { withDate: false })},` : ""} will say whether it did`
+    : "";
+  return span;
+}
+
+function countdown(isoTime) {
+  return setCountdown(element("span", { class: "countdown", "data-until": isoTime }));
+}
+
+// The Taskcluster queue hands tasks out in the order they were queued, so a
+// waiting task starts once the tasks ahead of it have left at the pace the
+// queue moved before the last update, and then takes as long as tasks of
+// its kind took. The suite waits for every task of the commit, of every
+// browser, while a cell's headline already counts its running chunks. The
+// headline also says how long is left, so this only gives the time.
+function estimateNote(estimate, { noun, durationsText, suite = false }) {
+  const counts = [];
+  if (suite && estimate.running) counts.push(`${plural(estimate.running, noun)} running`);
+  if (estimate.pending)
+    counts.push(`${plural(estimate.pending, noun)} waiting for a machine`
+      + (estimate.position ? ` (${estimate.pending > 1 ? "the last one is " : ""}number ${number.format(estimate.position)} of ${number.format(estimate.queue_length)} in the Taskcluster queue)` : ""));
+  if (estimate.unscheduled) counts.push(`${plural(estimate.unscheduled, noun)} waiting for other tasks to finish before joining the queue`);
+  if (!counts.length && !estimate.expected_finish) return null;
+  const pace = (estimate.pending || estimate.unscheduled) && estimate.tasks_per_hour
+    ? `, and the queue moved ${estimate.tasks_per_hour} tasks an hour since the update before` : "";
+  const title = estimate.expected_finish
+    ? `An estimate from the last update: ${durationsText}${pace}`
+    : UNKNOWN_ESTIMATE_REASONS[estimate.unknown] || "";
+  const lead = suite ? `The suite still waits for ${joinedList(counts)}` : joinedList(counts);
+  const expected = estimate.expected_finish
+    ? [`${lead ? " · e" : "E"}xpected to finish around ${formatTime(estimate.expected_finish)}`]
+    : [];
+  return element("div", { class: "detail", title }, lead ? lead[0].toUpperCase() + lead.slice(1) : "", ...expected);
+}
+
+// A suite can complete, have wpt.fyi take its runs, and open again when a
+// retried task starts, so when wpt.fyi got the run is the time that counts.
+function uploadStartText(cell, options) {
+  return cell.received ? `wpt.fyi received the results at ${formatTime(cell.since, options)}` : `The suite finished at ${formatTime(cell.since, options)}`;
+}
+
+function uploadEstimateTitle(estimate) {
+  if (!estimate.expected_finish) return UNKNOWN_ESTIMATE_REASONS[estimate.unknown] || "";
+  if (estimate.measured === "batch")
+    return "An estimate from the last update: when wpt.fyi should have processed every run it received in that batch, at the pace it has gone through them so far, "
+      + "which also counts the uploads of other commits it takes meanwhile. wpt.fyi does not take them in the order they arrived, "
+      + "so our run can be ready well before that, or somewhat after";
+  const median = formatSeconds(estimate.upload_seconds);
+  if (estimate.measured === "suite")
+    return `An estimate from the last update: wpt.fyi created the ${estimate.uploads} runs of daily commits of the last ${dashboard.settings.max_age_days} days a median of ${median} after their suite finished`;
+  return `An estimate from the last update: wpt.fyi took a median of ${median} to process our last ${estimate.uploads} runs of `
+    + (estimate.weekly ? "commits with a weekly tag, which send it the stable and beta runs of every browser too" : "daily commits")
+    + ", from receiving them to having them ready";
 }
 
 function stateCell(portKey, cell, row, channelLabel) {
@@ -537,17 +614,37 @@ function stateCell(portKey, cell, row, channelLabel) {
         top.append(element("span", { class: "headline" }, `Running · ${chunks.completed}/${chunks.expected} done`));
         details.push(`${plural(chunks.unfinished, "chunk")} not finished yet`);
       } else {
-        top.append(element("span", { class: "headline" }, `${chunks.running} Running · ${chunks.completed}/${chunks.expected} done`));
-        if (chunks.pending && !cell.queue) details.push(`${plural(chunks.pending, "chunk")} waiting for a machine`);
+        top.append(element("span", { class: "headline" }, `${chunks.running} Running · ${chunks.completed}/${chunks.expected} done`,
+          headlineEstimate(cell.estimate)));
+        if (chunks.pending && !cell.estimate) details.push(`${plural(chunks.pending, "chunk")} waiting for a machine`);
+        if (cell.estimate)
+          details.push(estimateNote(cell.estimate, { noun: "chunk", durationsText: "each chunk takes about as long as it took in its last runs, of the last two weeks" }));
       }
       break;
     case "waiting_for_suite":
-      top.append(element("span", { class: "headline" }, "Waiting for the suite"));
-      details.push("Our chunks passed; wpt.fyi imports the results once every browser on this commit has finished");
+      top.append(element("span", { class: "headline" }, "Waiting for the suite",
+        headlineEstimate(row.suite_estimate)));
+      details.push(element("div", { class: "detail" }, "Our chunks passed; wpt.fyi imports the results once every browser run on this ",
+        link(githubChecksUrl(row), "WPT commit", null, "The checks of every browser run on this WPT commit on GitHub"), " has finished"));
+      if (row.suite_estimate)
+        details.push(estimateNote(row.suite_estimate, { noun: "task", suite: true,
+          durationsText: "each chunk, of any browser, takes about as long as it took in its last runs, of the last two weeks, "
+            + "and a task without such runs as long as the finished tasks of its kind on this commit" }));
       break;
     case "uploading":
-      top.append(element("span", { class: "headline" }, "Uploading"));
-      details.push(`The suite finished at ${formatTime(cell.since, { withDate: false })}; this turns red at the first update after ${formatTime(cell.red_at)} if the run is still not on wpt.fyi`);
+      top.append(element("span", { class: "headline" }, "Uploading",
+        headlineEstimate(cell.estimate)));
+      details.push(`${uploadStartText(cell, { withDate: false })}; this turns red at the first update after ${formatTime(cell.red_at)} if the run is still not on wpt.fyi`);
+      if (cell.estimate?.batch_uploads)
+        details.push(element("div", { class: "detail", title: uploadEstimateTitle(cell.estimate) },
+          // In the past tense, because it is how things were at the last update, while the countdown in the headline goes on.
+          `At the last update, wpt.fyi had processed ${Math.round(100 * cell.estimate.batch_processed / cell.estimate.batch_uploads)}% `
+          + `(${cell.estimate.batch_processed} of ${cell.estimate.batch_uploads}) of the runs, of every browser, that it received for this WPT commit `
+          + `at ${formatTime(cell.since, { withDate: false })}; this one was still waiting`
+          + (cell.estimate.expected_finish ? ` · expected on wpt.fyi by around ${formatTime(cell.estimate.expected_finish)}` : "")));
+      else if (cell.estimate?.expected_finish)
+        details.push(element("div", { class: "detail", title: uploadEstimateTitle(cell.estimate) },
+          `Expected on wpt.fyi around ${formatTime(cell.estimate.expected_finish)}`));
       break;
     case "failed": {
       const failed = chunks.failed || [], missing = chunks.missing || [];
@@ -569,7 +666,7 @@ function stateCell(portKey, cell, row, channelLabel) {
     case "not_uploaded":
       top.append(element("span", { class: "headline" }, "Not uploaded"));
       details.push(errorText(`${portKey}:${row.tag}:${channelLabel || ""}`, reasonText(cell.reason)));
-      details.push(`The suite finished at ${formatTime(cell.since)}`);
+      details.push(uploadStartText(cell));
       break;
     case "suite_never_finished":
       top.append(element("span", { class: "headline" }, "Suite never finished"));
@@ -580,8 +677,13 @@ function stateCell(portKey, cell, row, channelLabel) {
       details.push("Taskcluster could not schedule the tasks of this commit");
       break;
     case "scheduling":
-      top.append(element("span", { class: "headline" }, "Scheduling tasks"));
-      details.push("A decision task of this commit is still creating its tasks");
+      top.append(element("span", { class: "headline" }, "Scheduling tasks",
+        headlineEstimate(cell.estimate)));
+      // A decision task waits in the same queue as the tasks it creates, often for hours, and then runs for a couple of minutes.
+      if (!cell.estimate?.pending && !cell.estimate?.unscheduled)
+        details.push(cell.estimate?.running ? "The decision task of this commit is creating its tasks" : "A decision task of this commit has not finished creating its tasks yet");
+      if (cell.estimate)
+        details.push(estimateNote(cell.estimate, { noun: "decision task", durationsText: "a decision task takes about as long as the decision tasks of the last weeks took" }));
       break;
     case "commit_unavailable":
       top.append(element("span", { class: "headline", title: row.error || "" }, "Could not read this commit"));
@@ -589,7 +691,7 @@ function stateCell(portKey, cell, row, channelLabel) {
       break;
     case "wptfyi_unchecked":
       top.append(element("span", { class: "headline" }, "wpt.fyi not checked"));
-      details.push(`The suite finished at ${formatTime(cell.since)}, but the last update could not read the runs on wpt.fyi, so this run may already be there. The next update checks again.`);
+      details.push(`${uploadStartText(cell)}, but the last update could not read the runs on wpt.fyi, so this run may already be there. The next update checks again.`);
       break;
     default:
       top.append(element("span", { class: "headline" }, "No run"));
@@ -606,7 +708,6 @@ function stateCell(portKey, cell, row, channelLabel) {
     const checks = githubChecksLink(row);
     if (checks) links.push(checks);
   }
-  if (cell.queue) details.push(queueNote(cell.queue));
   const node = element("div", { class: `cell ${STATE_KIND[cell.color] || "none"}` }, top,
     details.map(detail => typeof detail === "string" ? element("div", { class: "detail" }, detail) : detail));
   if (chunks.retried) node.append(element("div", { class: "note" }, `${plural(chunks.retried, "chunk")} passed after a retry`));
@@ -1037,5 +1138,8 @@ render();
 check();
 // A computer that sleeps can hold a timer back for hours, so a page that comes back into view checks at once if a check is overdue.
 document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() >= nextCheckAt) check(); });
-// Only this line, because redrawing the whole page would also lose the keyboard focus.
-setInterval(() => document.getElementById("generated")?.replaceChildren(...generatedParts()), 30000);
+// Only these, because redrawing the whole page would also lose the keyboard focus.
+setInterval(() => {
+  document.getElementById("generated")?.replaceChildren(...generatedParts());
+  for (const span of document.querySelectorAll(".countdown")) setCountdown(span);
+}, 30000);

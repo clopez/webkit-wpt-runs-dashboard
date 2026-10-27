@@ -77,20 +77,24 @@ SETTINGS = states.Settings()
 # An answer that parses but lacks the fields the script reads is as unusable as
 # a failed request, so it gets the same fallback instead of stopping the run.
 REQUEST_ERRORS = (FetchError, KeyError, TypeError, ValueError)
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 # A run that stops because of an unexpected error is tried again right away,
 # first with the same cache, in case the error was random, and then with an
 # empty one, in case the cache itself is what makes it fail.
 RETRY_PAUSE_SECONDS = 60
 ATTEMPTS = 3
+# The Taskcluster queue that every WPT task waits in, as its tasks say in
+# taskQueueId; the machines of its pool take tasks from it in order.
+TASK_QUEUE = "proj-wpt/ci-gw"
+# wpt.fyi creates the uploads of all the runs of a finished suite at once.
+BATCH_SPREAD = datetime.timedelta(minutes=1)
 
 
 def utc_now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def iso(moment):
-    return moment.isoformat().replace("+00:00", "Z")
+iso = states.iso
 
 
 def write_json_atomically(path, data):
@@ -101,7 +105,8 @@ def write_json_atomically(path, data):
     os.replace(temporary, path)
 
 
-CACHE_SECTIONS = ("tag_months", "commits", "builds", "build_history_complete", "diffs", "upload_statuses", "wptfyi_runs", "releases")
+CACHE_SECTIONS = ("tag_months", "commits", "builds", "build_history_complete", "diffs", "upload_statuses", "wptfyi_runs", "releases",
+                  "queue_view", "upload_batches")
 
 
 def load_cache(path, logger):
@@ -147,6 +152,7 @@ class Updater:
         self.cache = cache
         self.data_dir = pathlib.Path(data_dir)
         self.now = now
+        self.clock = utc_now
         self.today = now.date()
         self.since = self.today - datetime.timedelta(days=MAX_AGE_DAYS)
         self.used_commits = set()
@@ -157,6 +163,8 @@ class Updater:
         self.commits_this_run = {}
         self.all_builds = {}
         self.used_diffs = set()
+        self.estimate_targets = []
+        self.row_logs = []
         for section in CACHE_SECTIONS:
             cache.setdefault(section, {})
 
@@ -262,17 +270,30 @@ class Updater:
         # The list of all the uploads only covers about a day, so a run that
         # wpt.fyi rejected before the cache existed is only in the list of the
         # rejected ones, which goes back weeks.
+        uploads_by_sha = {}
         for stage in (None, "invalid"):
             try:
                 for entry in sources.wptfyi_upload_statuses(self.fetcher, stage):
                     if entry.get("browser_name") in products:
                         stored[str(entry["id"])] = {key: entry.get(key) for key in (
                             "id", "browser_name", "browser_version", "full_revision_hash", "stage", "error", "created", "updated")}
+                    # An upload has no browser name until wpt.fyi has processed it, which can take an
+                    # hour, but it says from the start which commit it is for and that Taskcluster sent it.
+                    sha = entry.get("full_revision_hash")
+                    if entry.get("uploader") == "taskcluster" and sha in self.tags_by_sha:
+                        pending = str(entry.get("stage", "")).startswith("WPTFYI_") if stage is None else None
+                        uploads_by_sha.setdefault(sha, []).append((entry["created"], pending))
             except REQUEST_ERRORS as error:
                 self.logger.error(f"Could not read the wpt.fyi {stage or 'latest'} upload statuses: {error}")
         since = self.since.isoformat()
         for key in [key for key, entry in stored.items() if (entry["created"] or "") < since]:
             del stored[key]
+        batches = self.cache["upload_batches"]
+        for sha in set(batches) | set(uploads_by_sha):
+            if sha in self.tags_by_sha:
+                batches[sha] = states.upload_batches(batches.get(sha, []), uploads_by_sha.get(sha, []), BATCH_SPREAD)
+            else:
+                del batches[sha]
         by_commit = {}
         for entry in stored.values():
             product = products[entry["browser_name"]]["product"]
@@ -316,12 +337,12 @@ class Updater:
             suite = sources.community_tc_suite(self.fetcher, sha)
             decisions = sources.decision_tasks(self.fetcher, sha)
             groups = []
-            every_browser = []
+            every_task = []
             our_browsers = {port["browser"] for port in PORTS}
             for decision in decisions:
-                parsed_chunks = [chunk for chunk in sources.task_group(self.fetcher, decision["task_group_id"], states.parse_task) if chunk]
-                every_browser.extend(parsed_chunks)
-                groups.append((decision["started_at"], [chunk for chunk in parsed_chunks if chunk["browser"] in our_browsers]))
+                tasks = sources.task_group(self.fetcher, decision["task_group_id"], lambda entry: (states.parse_task(entry), states.task_brief(entry)))
+                every_task.extend(brief for _, brief in tasks)
+                groups.append((decision["started_at"], [chunk for chunk, _ in tasks if chunk and chunk["browser"] in our_browsers]))
         except REQUEST_ERRORS as error:
             self.logger.error(f"{tag['name']}: {error}; " + ("keeping the previous data" if cached else "no data for this commit yet"))
             if cached:
@@ -356,8 +377,8 @@ class Updater:
             "task_groups": [decision["task_group_id"] for decision in decisions],
             "decision_failed": any(decision["conclusion"] in ("failure", "cancelled", "timed_out") for decision in decisions),
             "scheduling": not decisions_finished,
-            # Only a commit still in progress has waiting tasks, and a commit in progress is read again on every run, so this is never old.
-            "queue": states.push_queue(every_browser, self.now),
+            # Only a commit still in progress has unfinished tasks, and a commit in progress is read again on every run, so this is never old.
+            "progress": states.commit_progress(every_task),
             "fetched_at": iso(self.now),
             "tags": tags,
             # A version that could not be read is not final either, so that the next run reads it.
@@ -371,6 +392,10 @@ class Updater:
                     for key in ("github_url", "github_lookups"):
                         if key in previous:
                             failed[key] = previous[key]
+        if commit_data["final"]:
+            # Nothing of it is left to estimate, but its chunks and decision tasks still say how long they take.
+            commit_data["progress"] = {"unfinished": [], "decision_seconds": commit_data["progress"]["decision_seconds"],
+                                       "chunk_history": commit_data["progress"]["chunk_history"]}
         self.add_check_run_links(tag, commit_data)
         self.cache["commits"][sha] = commit_data
         return commit_data, False
@@ -407,23 +432,128 @@ class Updater:
         failures = previous.get("version_failures", 0) + read_failed
         return {"version": None, "version_source": None, "version_read_failed": read_failed and failures < VERSION_READS, "version_failures": failures}
 
-    def add_queue_estimates(self, rows):
-        """Adds when each waiting run should finish: once the tasks ahead of
-        its last chunk have started, at the pace its push's tasks have been
-        starting, plus the typical time of one of our chunks, the median over
-        the window of the average time of each run's chunks."""
-        cells = [cell for row in rows for channels in row["cells"].values() for cell in channels.values() if cell.get("chunks")]
-        chunk_times = sorted(cell["chunks"]["run_seconds"] / cell["chunks"]["timed_chunks"] for cell in cells if cell["chunks"].get("timed_chunks"))
-        for cell in cells:
-            queue = cell.get("queue")
-            if not queue:
+    def queue_view(self):
+        """Where each waiting task is in the Taskcluster queue, and how fast the
+        queue moves, from the previous view of it, kept in the cache. It is
+        read on every run, even with nothing of ours waiting, so that the pace
+        is known as soon as something is."""
+        try:
+            waiting = sources.pending_tasks(self.fetcher, TASK_QUEUE)
+        except REQUEST_ERRORS as error:
+            self.logger.warning(f"Could not read the Taskcluster queue {TASK_QUEUE}: {error}; no estimates for waiting tasks this time")
+            return None
+        # The time of the read, not of the start of the run, which can be many minutes earlier when the cache is filled again.
+        read_at = self.clock()
+        previous = self.cache["queue_view"]
+        if previous and read_at - states.parse_time(previous["at"]) < states.QUEUE_PACE_MIN_WINDOW:
+            # Too recent to measure the pace from, as after an update run by hand, so the view is kept for the next run, with the pace it had.
+            pace, unknown = previous.get("tasks_per_hour"), previous.get("pace_unknown")
+        else:
+            pace, unknown, measured = states.queue_pace(previous, waiting[0] if waiting else None, read_at)
+            busy = {"at": iso(read_at), "tasks_per_hour": pace} if measured else (previous or {}).get("busy_pace")
+            self.cache["queue_view"] = {"at": iso(read_at), "tasks": waiting, "tasks_per_hour": pace, "pace_unknown": unknown, "busy_pace": busy}
+        pace_text = f"{pace} an hour leaving it" if pace else "it has not moved since the previous update" if unknown == "stuck" else "pace not known yet"
+        self.logger.info(f"Taskcluster queue {TASK_QUEUE}: {plural(len(waiting), 'task')} waiting, {pace_text}")
+        return {"id": TASK_QUEUE, "positions": {key: number for number, key in enumerate(waiting, 1)}, "length": len(waiting),
+                "tasks_per_hour": pace, "pace_unknown": unknown}
+
+    def add_estimates(self, rows):
+        """Adds when each running run, each commit still scheduling and each
+        unfinished suite should finish. A chunk, of any browser, takes about
+        as long as the same chunk took in its latest runs, and a chunk that
+        never finished before about as long as the finished chunks of its
+        browser and channel on the same commit, or as the commit's finished
+        chunks. A decision task takes as long as the window's ones did."""
+        queue = self.queue_view()
+        # Every commit in the window is in the cache, so its chunks and decision tasks give their usual times.
+        typical = states.chunk_history(((max(map(tag_time, commit.get("tags", [])), default=states.EARLIEST), commit)
+                                        for commit in self.cache["commits"].values()), self.now)
+        decision_seconds = [seconds for commit in self.cache["commits"].values() for seconds in (commit.get("progress") or {}).get("decision_seconds", [])]
+        if decision_seconds:
+            typical[states.DECISION_TASK] = sorted(decision_seconds)
+        for row, commit_data in self.estimate_targets:
+            progress = commit_data.get("progress")
+            if commit_data.get("final") or not progress or not progress["unfinished"]:
                 continue
-            queue["expected_finish"] = None
-            if queue["position"] and queue["tasks_per_hour"] and chunk_times:
-                seconds_per_chunk = chunk_times[len(chunk_times) // 2]
-                queue["seconds_per_chunk"] = round(seconds_per_chunk)
-                seconds = queue["position"] / queue["tasks_per_hour"] * 3600 + seconds_per_chunk
-                queue["expected_finish"] = iso(self.now + datetime.timedelta(seconds=seconds))
+
+            def durations_for(task, progress=progress):
+                return typical.get(task["history_key"]) or progress["seconds_by_kind"].get(task["kind"]) or progress["chunk_seconds"] or None
+
+            for port in PORTS:
+                for channel, cell in row["cells"][port["key"]].items():
+                    if cell["state"] == "scheduling":
+                        # The chunks are created as soon as the decision tasks finish.
+                        tasks = [task for task in progress["unfinished"] if task["name"] == states.DECISION_TASK]
+                    elif cell["state"] == "running":
+                        group = cell["chunks"].get("task_group_id")
+                        tasks = [task for task in progress["unfinished"] if task["kind"] == f"{port['browser']}-{channel}" and task["task_group_id"] == group]
+                    else:
+                        continue
+                    if tasks:
+                        cell["estimate"] = states.finish_estimate(tasks, queue, durations_for, self.now)
+            if not row["suite"] or row["suite"]["status"] != "completed":
+                row["suite_estimate"] = states.finish_estimate(progress["unfinished"], queue, durations_for, self.now)
+        self.add_upload_estimates(rows)
+
+    def batch_with(self, sha, chunks):
+        """The first batch of this commit's runs that wpt.fyi received after our
+        last chunk finished, or None. wpt.fyi sends every run whose checks all
+        passed in one batch, so a batch from after that has our run in it."""
+        if not chunks or not chunks.get("last_resolved"):
+            return None
+        finished = states.parse_time(chunks["last_resolved"])
+        return next((batch for batch in self.cache["upload_batches"].get(sha, []) if states.parse_time(batch["at"]) >= finished), None)
+
+    def has_weekly_tag(self, sha):
+        return any(name.startswith("epochs/weekly/") for name in self.tags_by_sha.get(sha, ()))
+
+    def add_upload_estimates(self, rows):
+        """A run should be on wpt.fyi by when wpt.fyi has gone through the batch
+        it came in, at the pace it has gone through it so far. Before it has
+        processed any of the batch, the run should be ready as long after
+        wpt.fyi received it as our runs took to be processed, which is longer
+        for a commit with a weekly tag: it sends wpt.fyi the stable and beta
+        runs of every browser too, about twice as many at once. Until there
+        are enough of those times, which the cache keeps from when it
+        started, a daily commit can still use how long after its suite
+        finished its run appeared, because its suite rarely opens again; a
+        weekly one has no estimate."""
+        processed = {True: [], False: []}
+        for entry in self.cache["upload_statuses"].values():
+            if entry["stage"] == "VALID" and entry["created"] and entry["updated"]:
+                seconds = (states.parse_time(entry["updated"]) - states.parse_time(entry["created"])).total_seconds()
+                processed[self.has_weekly_tag(entry["full_revision_hash"])].append(seconds)
+        after_suite, after_suite_count = states.upload_delay([row for row in rows if not self.has_weekly_tag(row["sha"])])
+        for row in rows:
+            weekly = self.has_weekly_tag(row["sha"])
+            if len(processed[weekly]) >= states.MIN_UPLOADS_FOR_ESTIMATE:
+                delay, uploads, measured = round(states.median(processed[weekly])), len(processed[weekly]), "received"
+            elif not weekly and after_suite is not None:
+                delay, uploads, measured = after_suite, after_suite_count, "suite"
+            else:
+                delay, uploads, measured = None, len(processed[weekly]), None
+            for channels in row["cells"].values():
+                for cell in channels.values():
+                    if cell["state"] != "uploading":
+                        continue
+                    cell["estimate"] = {"expected_finish": iso(states.parse_time(cell["since"]) + datetime.timedelta(seconds=delay)) if delay is not None else None,
+                                        "upload_seconds": delay, "uploads": uploads, "measured": measured, "weekly": weekly,
+                                        "unknown": None if delay is not None else "weekly_uploads" if weekly else "uploads"}
+                    batch = self.batch_with(row["sha"], cell["chunks"]) if cell.get("received") else None
+                    if batch and batch["uploads"]:
+                        cell["estimate"].update({"batch_uploads": batch["uploads"], "batch_processed": batch["processed"]})
+                        # Our run is one of them, so it is ready when the batch is at the latest, at the pace wpt.fyi has
+                        # gone through it so far, which counts the uploads of other commits that its processor also takes.
+                        if batch["processed"]:
+                            received = states.parse_time(batch["at"])
+                            done = received + (self.now - received) * batch["uploads"] / batch["processed"]
+                            cell["estimate"].update({"expected_finish": iso(max(done, self.now).replace(microsecond=0)), "measured": "batch", "unknown": None})
+
+    def log_rows(self):
+        """Logged once the estimates are known, because the lines include them."""
+        for tag_name, row in self.row_logs:
+            self.logger.info(f"{tag_name}: " + ", ".join(f"{port['product']} {channel} {describe(cell, row)}"
+                                                       for port in PORTS for channel, cell in row["cells"][port["key"]].items()))
 
     def add_check_run_links(self, tag, commit_data):
         for summary in commit_data["chunks"].values():
@@ -484,7 +614,6 @@ class Updater:
                "task_groups": commit_data["task_groups"], "stale": stale, "cells": {}}
         if commit_data.get("unavailable"):
             row["error"] = commit_data["error"]
-        log_parts = []
         for port in PORTS:
             row["cells"][port["key"]] = {}
             for channel in channels:
@@ -497,16 +626,15 @@ class Updater:
                                            decision_failed=commit_data["decision_failed"],
                                            wptfyi_checked=listing not in self.unchecked_listings,
                                            scheduling=commit_data.get("scheduling", False),
-                                           commit_unavailable=commit_data.get("unavailable", False))
+                                           commit_unavailable=commit_data.get("unavailable", False),
+                                           received_at=(self.batch_with(tag["sha"], chunks) or {}).get("at"))
                 cell["chunks"] = with_links(chunks, port["product"])
-                if chunks and chunks.get("pending") and not commit_data.get("final"):
-                    cell["queue"] = states.queue_position(chunks, commit_data.get("queue"), self.now)
                 if run:
                     cell["wptfyi"] = self.wptfyi_cell(port, channel, run, channel_runs)
                 row["cells"][port["key"]][channel] = cell
-                log_parts.append(f"{port['product']} {channel} {describe(cell)}")
+        self.estimate_targets.append((row, commit_data))
         if not commit_data.get("final", False) or stale:
-            self.logger.info(f"{tag['name']}: " + ", ".join(log_parts))
+            self.row_logs.append((tag["name"], row))
         return row
 
     def prune(self):
@@ -540,10 +668,20 @@ def with_links(chunks, product):
     return chunks
 
 
-def describe(cell):
+def describe(cell, row):
     chunks = cell.get("chunks") or {}
     if cell["state"] == "running":
-        return f"{chunks.get('running', 0)} running, {chunks.get('completed', 0)}/{chunks.get('expected', 0)} done"
+        return f"{chunks.get('running', 0)} running, {chunks.get('completed', 0)}/{chunks.get('expected', 0)} done" + expected_text(cell.get("estimate"))
+    if cell["state"] == "scheduling" and cell.get("estimate"):
+        estimate = cell["estimate"]
+        waiting = f", decision task number {estimate['position']} in the queue" if estimate["position"] else ""
+        return f"scheduling{waiting}{expected_text(estimate)}"
+    if cell["state"] == "waiting_for_suite" and row.get("suite_estimate"):
+        estimate = row["suite_estimate"]
+        unfinished = estimate["running"] + estimate["pending"] + estimate["unscheduled"]
+        return f"waiting for suite ({plural(unfinished, 'task')} left{expected_text(estimate)})"
+    if cell["state"] == "uploading" and cell.get("estimate"):
+        return f"uploading{expected_text(cell['estimate'])}"
     if cell["state"] == "failed":
         return f"failed ({len(chunks.get('failed', []))} failed, {len(chunks.get('missing', []))} missing)"
     return cell["state"].replace("_", " ")
@@ -560,15 +698,17 @@ def update(args, logger, recorder, token):
 
     builds = updater.builds()
     releases = updater.releases()
-    statuses = updater.upload_statuses()
     wptfyi_runs = updater.wptfyi_runs()
     tags_by_kind = {kind: updater.tags(kind) for kind in CHANNELS_BY_TAG_KIND}
     for tags in tags_by_kind.values():
         for tag in tags:
             updater.tags_by_sha.setdefault(tag["sha"], set()).add(tag["name"])
+    # After the tags, so that only the batches of the commits in the window are kept.
+    statuses = updater.upload_statuses()
     rows = {kind: [updater.row(tag, channels, wptfyi_runs, statuses) for tag in reversed(tags_by_kind[kind])]
             for kind, channels in CHANNELS_BY_TAG_KIND.items()}
-    updater.add_queue_estimates(rows["daily"] + rows["weekly"])
+    updater.add_estimates(rows["daily"] + rows["weekly"])
+    updater.log_rows()
     # Pruning drops what no row used, so with incomplete inputs it would throw away good data, like every diff.
     if updater.unchecked_listings or updater.tag_listing_failed:
         logger.info("Not cleaning up the cache this time, because some lists could not be read")
@@ -584,7 +724,7 @@ def update(args, logger, recorder, token):
         "warnings": recorder.warnings,
         "settings": {"max_age_days": MAX_AGE_DAYS, "stale_after_hours": STALE_AFTER_HOURS, "update_every_minutes": UPDATE_EVERY_MINUTES,
                      "upload_grace_hours": SETTINGS.upload_grace_hours, "suite_timeout_hours": SETTINGS.suite_timeout_hours,
-                     "check_run_limit": SETTINGS.check_run_limit},
+                     "check_run_limits": [list(limit) for limit in SETTINGS.check_run_limits]},
         "ports": [{key: port[key] for key in ("key", "label", "product", "builder", "site")} for port in PORTS],
         "builds": builds,
         "releases": releases,
@@ -602,6 +742,14 @@ def update(args, logger, recorder, token):
     request_text = ", ".join(f"{service} {count}" for service, count in requests.items())
     logger.info(f"Wrote dashboard.json: {len(rows['daily'])} daily and {len(rows['weekly'])} weekly tags, {cells} cells"
                 + (f", {', '.join(problems)}" if problems else "") + f"; requests: {request_text}; {time.monotonic() - started:.1f} s")
+
+
+def expected_text(estimate):
+    if not estimate:
+        return ""
+    if estimate["expected_finish"]:
+        return f", expected around {estimate['expected_finish'][11:16]} UTC"
+    return f", no estimate ({estimate['unknown']} not known)" if estimate.get("unknown") else ""
 
 
 def plural(count, noun):

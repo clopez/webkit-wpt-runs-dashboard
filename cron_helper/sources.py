@@ -86,6 +86,36 @@ def task_group(fetcher, task_group_id, keep=lambda task: task):
             return kept
 
 
+# Workers take tasks by priority, and then in the order they were queued
+# (queue_pending_tasks_get in Taskcluster's db/versions/0093.yml).
+TASK_PRIORITIES = ["lowest", "very-low", "low", "medium", "high", "very-high", "highest"]
+
+
+def pending_tasks(fetcher, task_queue_id):
+    """The waiting tasks of a Taskcluster queue, as "taskId/runId", in the
+    order workers will take them. Each task in the list carries its push's
+    whole GitHub event, like in a task group listing, so it is read in pages
+    of the same size. The pages are cut by the last task read, not by
+    position, so tasks that leave the queue while it is read shift nothing."""
+    waiting = []
+    read = set()
+    continuation = None
+    while True:
+        query = {"limit": TASK_GROUP_PAGE}
+        if continuation:
+            query["continuationToken"] = continuation
+        page = fetcher.get_json(f"{TASKCLUSTER_ROOT}/api/queue/v1/task-queues/{urllib.parse.quote(task_queue_id, safe='')}/pending?"
+                                f"{urllib.parse.urlencode(query)}", "taskcluster")
+        for task in page["tasks"]:
+            key = f"{task['taskId']}/{task['runId']}"
+            if key not in read:
+                read.add(key)
+                waiting.append((-TASK_PRIORITIES.index(task["task"].get("priority", "lowest")), len(waiting), key))
+        continuation = page.get("continuationToken")
+        if not continuation:
+            return [key for _, _, key in sorted(waiting)]
+
+
 def task_url(task_id):
     return f"{TASKCLUSTER_ROOT}/tasks/{task_id}"
 

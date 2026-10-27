@@ -88,6 +88,22 @@ class TaskGroupTest(unittest.TestCase):
         self.assertEqual(seen, ["page None", 1, 2, "page second", 3])
 
 
+class PendingTasksTest(unittest.TestCase):
+    def test_the_queue_is_read_in_pages_in_the_order_workers_take_its_tasks(self):
+        def waiting(task_id, priority="lowest", run_id=0):
+            return {"taskId": task_id, "runId": run_id, "task": {"priority": priority}}
+        pages = {None: {"tasks": [waiting("a"), waiting("b", run_id=1)], "continuationToken": "second"},
+                 "second": {"tasks": [waiting("b", run_id=1), waiting("urgent", "high"), waiting("c")]}}
+
+        def reply(url):
+            self.assertIn("/task-queues/proj-wpt%2Fci-gw/pending?", url)
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            self.assertEqual(query["limit"], [str(sources.TASK_GROUP_PAGE)])
+            return pages[query.get("continuationToken", [None])[0]]
+
+        self.assertEqual(sources.pending_tasks(FakeFetcher(reply), "proj-wpt/ci-gw"), ["urgent/0", "a/0", "b/1", "c/0"])
+
+
 class ReleasesTest(unittest.TestCase):
     def test_the_newest_release_of_each_channel_is_chosen_by_version_and_not_by_date(self):
         rows = listing(("webkitgtk-2.52.0.tar.xz", "2026-03-18 14:26"), ("webkitgtk-2.50.7.tar.xz", "2026-03-20 09:00"),
@@ -142,8 +158,10 @@ class UpdaterTest(unittest.TestCase):
             "storage.example/3.json.gz": {"/a/1.html": {"s": "E", "c": [0, 0]}},
         }
 
-    def updater(self, fetcher, cache=None):
-        return update_dashboard.Updater(fetcher, self.logger, cache if cache is not None else {"version": update_dashboard.CACHE_VERSION}, self.data_dir, NOW)
+    def updater(self, fetcher, cache=None, clock=lambda: NOW):
+        updater = update_dashboard.Updater(fetcher, self.logger, cache if cache is not None else {"version": update_dashboard.CACHE_VERSION}, self.data_dir, NOW)
+        updater.clock = clock
+        return updater
 
     def row(self, updater, runs, builds=None):
         wptfyi_runs = {f"{port['product']}-{channel}": [] for port in update_dashboard.PORTS for channel in update_dashboard.ALL_CHANNELS}
@@ -383,6 +401,9 @@ class UpdaterTest(unittest.TestCase):
         self.assertIn("the format of WPT's log may have changed", logged.output[0])
         self.assertIsNone(commit_data["chunks"]["webkitgtk_minibrowser-nightly"]["version"])
         self.assertTrue(commit_data["final"])
+        # A final commit has nothing left to estimate, so it only keeps how long its chunks and decision tasks took.
+        self.assertEqual(sorted(commit_data["progress"]), ["chunk_history", "decision_seconds", "unfinished"])
+        self.assertEqual(commit_data["progress"]["unfinished"], [])
 
     def test_a_log_that_stays_unreadable_stops_keeping_the_commit_open(self):
         cache = {"version": update_dashboard.CACHE_VERSION}
@@ -392,35 +413,186 @@ class UpdaterTest(unittest.TestCase):
                 commit_data, _ = self.updater(FakeFetcher(replies), cache).commit(TAG)
         self.assertTrue(commit_data["final"])
 
-    def queue_rows(self, position, tasks_per_hour):
-        waiting = {"chunks": {"timed_chunks": 0, "run_seconds": 0}, "queue": {"pending": 2, "position": position, "tasks_per_hour": tasks_per_hour}}
-        done = {"chunks": {"timed_chunks": 33, "run_seconds": 33 * 1500}}
-        return [{"cells": {"gtk": {"nightly": waiting}}}, {"cells": {"gtk": {"nightly": done}}}]
-
-    def test_the_expected_time_is_when_the_tasks_ahead_have_started_plus_one_chunk(self):
-        rows = self.queue_rows(position=30, tasks_per_hour=60)
-        self.updater(FakeFetcher({})).add_queue_estimates(rows)
-        # 30 tasks at 60 an hour take 30 minutes, and then the chunk takes the 25 minutes of a chunk.
-        self.assertEqual(rows[0]["cells"]["gtk"]["nightly"]["queue"]["expected_finish"], update_dashboard.iso(NOW + datetime.timedelta(minutes=55)))
-        self.assertNotIn("queue", rows[1]["cells"]["gtk"]["nightly"])
-
-    def test_no_time_is_expected_without_a_position_or_a_pace(self):
-        for position, pace in ((None, None), (30, None)):
-            rows = self.queue_rows(position, pace)
-            self.updater(FakeFetcher({})).add_queue_estimates(rows)
-            self.assertIsNone(rows[0]["cells"]["gtk"]["nightly"]["queue"]["expected_finish"])
-
-    def test_a_waiting_chunk_gives_its_cell_a_place_in_the_queue_without_any_extra_request(self):
+    def estimate_replies(self):
+        def entry(name, state, task_id, started=None, resolved=None):
+            return {"task": {"metadata": {"name": name, "description": "A subset of WPT's \"reftest\" tests (chunk number 1 of 1)."},
+                             "taskQueueId": update_dashboard.TASK_QUEUE},
+                    "status": {"taskId": task_id, "taskGroupId": "group1", "state": state,
+                               "runs": [{"runId": 0, "state": state, "scheduled": "2026-09-29T09:00:00Z", "started": started, "resolved": resolved}]}}
+        def waiting(task_id):
+            return {"taskId": task_id, "runId": 0, "task": {"priority": "lowest"}}
         replies = self.replies()
-        waiting = chunk_entry("webkitgtk_minibrowser", "reftest", 1, 1, "pending")
-        waiting["status"]["runs"] = [{"runId": 0, "state": "pending", "scheduled": "2026-09-29T11:00:00Z"}]
-        started = chunk_entry("wpewebkit_minibrowser", "reftest", 1, 1)
-        started["status"]["runs"][0].update({"scheduled": "2026-09-29T10:59:00Z", "started": "2026-09-29T11:30:00Z"})
-        replies["task-group/group1/list"] = {"tasks": [started, waiting]}
-        fetcher = FakeFetcher(replies)
-        row = self.row(self.updater(fetcher), {})
-        self.assertEqual(row["cells"]["gtk"]["nightly"]["queue"], {"pending": 1, "position": 1, "tasks_per_hour": 2})
-        self.assertFalse(any("task-queues" in url or "worker-pool" in url for url in fetcher.urls))
+        replies[f"commits/{SHA}/check-suites"] = {"check_suites": [{"id": 1, "status": "queued", "conclusion": None, "created_at": "2026-09-29T08:40:52Z",
+                                                                   "updated_at": "2026-09-29T08:40:52Z", "latest_check_runs_count": 412}]}
+        replies["task-group/group1/list"] = {"tasks": [
+            entry("wpt-wpewebkit_minibrowser-nightly-reftest-1", "completed", "wpe", "2026-09-29T10:00:00Z", "2026-09-29T10:20:00Z"),
+            entry("wpt-webkitgtk_minibrowser-nightly-reftest-1", "pending", "gtk"),
+            entry("wpt-firefox-nightly-reftest-1", "pending", "firefox")]}
+        replies["task-queues/proj-wpt%2Fci-gw/pending"] = {"tasks": [waiting("gtk"), waiting("other"), waiting("firefox")]}
+        return replies
+
+    def test_a_running_cell_and_an_unfinished_suite_get_when_they_should_finish(self):
+        # An hour ago two tasks were ahead of ours, and they have left the queue since, so it moves 2 tasks an hour.
+        cache = {"version": update_dashboard.CACHE_VERSION, "queue_view": {"at": "2026-09-29T11:00:00Z", "tasks": ["a/0", "b/0", "gtk/0", "firefox/0"]}}
+        updater = self.updater(FakeFetcher(self.estimate_replies()), cache)
+        row = self.row(updater, {})
+        updater.add_estimates([row])
+        gtk, wpe = row["cells"]["gtk"]["nightly"], row["cells"]["wpe"]["nightly"]
+        # Our waiting chunk is first, so it starts in half an hour, and takes the 20 minutes that the commit's finished task took.
+        self.assertEqual(gtk["estimate"], {"running": 0, "pending": 1, "unscheduled": 0, "position": 1, "queue_length": 3, "tasks_per_hour": 2,
+                                           "expected_finish": "2026-09-29T12:50:00Z", "unknown": None})
+        self.assertEqual(wpe["state"], "waiting_for_suite")
+        # The suite also waits for Firefox's chunk, which is third.
+        self.assertEqual((row["suite_estimate"]["pending"], row["suite_estimate"]["position"], row["suite_estimate"]["expected_finish"]),
+                         (2, 3, "2026-09-29T13:50:00Z"))
+        self.assertNotIn("chunk_seconds", wpe["chunks"])
+        self.assertEqual(cache["queue_view"], {"at": "2026-09-29T12:00:00Z", "tasks": ["gtk/0", "other/0", "firefox/0"], "tasks_per_hour": 2,
+                                               "pace_unknown": None, "busy_pace": {"at": "2026-09-29T12:00:00Z", "tasks_per_hour": 2}})
+
+    def test_the_pace_counts_from_when_the_queue_was_read_not_from_when_the_run_started(self):
+        # A run that fills the cache again reads the queue many minutes after it started.
+        cache = {"version": update_dashboard.CACHE_VERSION, "queue_view": {"at": "2026-09-29T11:00:00Z", "tasks": ["a/0", "b/0", "gtk/0", "firefox/0"]}}
+        updater = self.updater(FakeFetcher(self.estimate_replies()), cache, clock=lambda: NOW + datetime.timedelta(minutes=60))
+        row = self.row(updater, {})
+        updater.add_estimates([row])
+        self.assertEqual(row["cells"]["gtk"]["nightly"]["estimate"]["tasks_per_hour"], 1)
+        self.assertEqual(cache["queue_view"]["at"], "2026-09-29T13:00:00Z")
+
+    def upload_rows(self, sha="daily-sha"):
+        def row(state, created=None, row_sha="old"):
+            cell = {"state": state, "since": "2026-09-29T11:30:00Z", "chunks": {}}
+            if created:
+                cell["wptfyi"] = {"created_at": created}
+            return {"sha": row_sha, "suite": {"status": "completed", "updated_at": "2026-09-28T08:00:00Z"}, "cells": {"gtk": {"nightly": cell}}}
+        return [row("uploaded", f"2026-09-28T08:{minutes}:00Z") for minutes in (10, 20, 30, 40, 50)] + [row("uploading", row_sha=sha)]
+
+    def processed(self, sha, minutes):
+        return {"id": minutes, "browser_name": "webkitgtk", "full_revision_hash": sha, "stage": "VALID",
+                "created": "2026-09-27T01:17:03Z", "updated": f"2026-09-27T{1 + (17 + minutes) // 60:02d}:{(17 + minutes) % 60:02d}:03Z"}
+
+    def test_a_daily_run_is_expected_on_wptfyi_as_long_after_its_suite_as_the_daily_uploads_took(self):
+        rows = self.upload_rows()
+        updater = self.updater(FakeFetcher({"task-queues/": {"tasks": []}}))
+        updater.add_estimates(rows)
+        self.assertEqual(rows[-1]["cells"]["gtk"]["nightly"]["estimate"],
+                         {"expected_finish": "2026-09-29T12:00:00Z", "upload_seconds": 30 * 60, "uploads": 5, "measured": "suite", "weekly": False, "unknown": None})
+        self.assertNotIn("estimate", rows[0]["cells"]["gtk"]["nightly"])
+        # Too few uploads to say how long wpt.fyi takes.
+        rows = rows[1:]
+        updater.add_estimates(rows)
+        self.assertEqual(rows[-1]["cells"]["gtk"]["nightly"]["estimate"]["unknown"], "uploads")
+
+    def test_a_weekly_run_is_expected_as_long_after_wptfyi_received_it_as_weekly_runs_took_to_be_processed(self):
+        cache = {"version": update_dashboard.CACHE_VERSION,
+                 "upload_statuses": {str(minutes): self.processed("weekly-sha-before", minutes) for minutes in (20, 25, 60, 70, 80)}}
+        updater = self.updater(FakeFetcher({"task-queues/": {"tasks": []}}), cache)
+        updater.tags_by_sha = {"weekly-sha": {"epochs/weekly/2026-09-28_04H"}, "weekly-sha-before": {"epochs/weekly/2026-09-21_04H"}}
+        rows = self.upload_rows("weekly-sha")
+        updater.add_estimates(rows)
+        # Not the 30 minutes after their suite that daily runs took: weekly runs took a median of 60 to be processed.
+        self.assertEqual(rows[-1]["cells"]["gtk"]["nightly"]["estimate"],
+                         {"expected_finish": "2026-09-29T12:30:00Z", "upload_seconds": 60 * 60, "uploads": 5, "measured": "received", "weekly": True, "unknown": None})
+        # Without enough weekly times, no estimate rather than the daily one.
+        del cache["upload_statuses"]["80"]
+        rows = self.upload_rows("weekly-sha")
+        updater.add_estimates(rows)
+        self.assertEqual(rows[-1]["cells"]["gtk"]["nightly"]["estimate"]["unknown"], "weekly_uploads")
+
+    def test_a_run_is_expected_when_wptfyi_has_gone_through_its_batch_at_the_pace_it_has_so_far(self):
+        cache = {"version": update_dashboard.CACHE_VERSION, "upload_batches": {"weekly-sha": [{"at": "2026-09-29T11:00:00Z", "uploads": 15, "processed": 5}]}}
+        updater = self.updater(FakeFetcher({"task-queues/": {"tasks": []}}), cache)
+        updater.tags_by_sha = {"weekly-sha": {"epochs/weekly/2026-09-28_04H"}}
+        rows = self.upload_rows("weekly-sha")
+        cell = rows[-1]["cells"]["gtk"]["nightly"]
+        cell.update({"since": "2026-09-29T11:00:00Z", "received": True, "chunks": {"last_resolved": "2026-09-29T10:00:00Z"}})
+        updater.add_estimates(rows)
+        # 5 of 15 in the hour since it arrived, so all 15 in three hours.
+        self.assertEqual({key: cell["estimate"][key] for key in ("expected_finish", "measured", "batch_uploads", "batch_processed", "unknown")},
+                         {"expected_finish": "2026-09-29T14:00:00Z", "measured": "batch", "batch_uploads": 15, "batch_processed": 5, "unknown": None})
+        # With none processed yet there is no pace, and without enough weekly times no estimate, but the progress is still shown.
+        cache["upload_batches"]["weekly-sha"][0]["processed"] = 0
+        rows = self.upload_rows("weekly-sha")
+        cell = rows[-1]["cells"]["gtk"]["nightly"]
+        cell.update({"since": "2026-09-29T11:00:00Z", "received": True, "chunks": {"last_resolved": "2026-09-29T10:00:00Z"}})
+        updater.add_estimates(rows)
+        self.assertEqual((cell["estimate"]["unknown"], cell["estimate"]["batch_uploads"], cell["estimate"]["batch_processed"]), ("weekly_uploads", 15, 0))
+
+    def test_a_run_counts_as_uploading_from_the_batch_wptfyi_received_even_if_the_suite_opened_again(self):
+        replies = self.replies()
+        # The suite completed early while a retried task waited for a machine, and opened again when it started.
+        replies[f"commits/{SHA}/check-suites"] = {"check_suites": [{"id": 1, "status": "in_progress", "conclusion": None, "created_at": "2026-09-26T18:40:52Z",
+                                                                   "updated_at": "2026-09-29T11:40:00Z", "latest_check_runs_count": 638}]}
+        pending_upload = {"id": 7, "full_revision_hash": SHA, "uploader": "taskcluster", "stage": "WPTFYI_RECEIVED", "created": "2026-09-29T11:17:03Z"}
+        earlier_upload = {"id": 6, "full_revision_hash": SHA, "uploader": "taskcluster", "stage": "VALID", "browser_name": "chrome", "created": "2026-09-27T05:00:00Z"}
+        same_batch = {**pending_upload, "id": 9, "created": "2026-09-29T11:17:03.613Z"}
+        other_commit = {"id": 8, "full_revision_hash": "elsewhere", "uploader": "taskcluster", "stage": "WPTFYI_RECEIVED", "created": "2026-09-29T11:17:03Z"}
+        replies["wpt.fyi/api/status/invalid"] = []
+        replies["wpt.fyi/api/status"] = [pending_upload, same_batch, earlier_upload, other_commit]
+        cache = {"version": update_dashboard.CACHE_VERSION}
+        updater = self.updater(FakeFetcher(replies), cache)
+        updater.tags_by_sha = {SHA: {TAG["name"]}}
+        statuses = updater.upload_statuses()
+        self.assertEqual(cache["upload_batches"], {SHA: [{"at": "2026-09-27T05:00:00Z", "uploads": 1, "processed": 1},
+                                                         {"at": "2026-09-29T11:17:03Z", "uploads": 2, "processed": 0}]})
+        wptfyi_runs = {f"{port['product']}-{channel}": [] for port in update_dashboard.PORTS for channel in update_dashboard.ALL_CHANNELS}
+        row = updater.row(TAG, ["nightly"], wptfyi_runs, statuses)
+        wpe = row["cells"]["wpe"]["nightly"]
+        # Only the batch after our last chunk finished, at 06:00 on the 27th, can have our run.
+        self.assertEqual((wpe["state"], wpe["since"], wpe["received"]), ("uploading", "2026-09-29T11:17:03Z", True))
+
+    def test_a_commit_whose_decision_task_waits_for_a_machine_is_scheduling_until_it_has_run(self):
+        replies = self.replies()
+        replies[f"commits/{SHA}/check-runs"] = {"check_runs": [{"external_id": "group1", "started_at": "2026-09-29T11:00:00Z", "status": "queued", "conclusion": None}]}
+        replies["task-group/group1/list"] = {"tasks": [
+            {"task": {"metadata": {"name": "wpt-decision-task", "description": ""}, "taskQueueId": update_dashboard.TASK_QUEUE},
+             "status": {"taskId": "group1", "taskGroupId": "group1", "state": "pending",
+                        "runs": [{"runId": 0, "state": "pending", "scheduled": "2026-09-29T11:00:00Z"}]}}]}
+        replies["task-queues/proj-wpt%2Fci-gw/pending"] = {"tasks": [{"taskId": "x", "runId": 0, "task": {}}, {"taskId": "group1", "runId": 0, "task": {}}]}
+        # Other commits in the window say how long a decision task takes, and the queue moved 2 tasks in the last hour.
+        cache = {"version": update_dashboard.CACHE_VERSION, "queue_view": {"at": "2026-09-29T11:00:00Z", "tasks": ["a/0", "b/0", "x/0"]},
+                 "commits": {"other": {"progress": {"decision_seconds": [60, 120, 600]}}}}
+        updater = self.updater(FakeFetcher(replies), cache)
+        row = self.row(updater, {})
+        updater.add_estimates([row])
+        gtk = row["cells"]["gtk"]["nightly"]
+        self.assertEqual(gtk["state"], "scheduling")
+        # Second in the queue at 2 tasks an hour, then 2 minutes to run.
+        self.assertEqual((gtk["estimate"]["pending"], gtk["estimate"]["position"], gtk["estimate"]["expected_finish"]), (1, 2, "2026-09-29T13:02:00Z"))
+
+    def test_a_stuck_queue_gives_no_time_and_says_so(self):
+        cache = {"version": update_dashboard.CACHE_VERSION, "queue_view": {"at": "2026-09-29T11:00:00Z", "tasks": ["gtk/0", "other/0"],
+                                                                         "busy_pace": {"at": "2026-09-29T11:00:00Z", "tasks_per_hour": 150}}}
+        updater = self.updater(FakeFetcher(self.estimate_replies()), cache)
+        row = self.row(updater, {})
+        updater.add_estimates([row])
+        self.assertEqual(row["cells"]["gtk"]["nightly"]["estimate"]["unknown"], "stuck")
+        # The busy pace is kept for when the queue moves again.
+        self.assertEqual(cache["queue_view"]["busy_pace"]["tasks_per_hour"], 150)
+
+    def test_without_the_queue_waiting_tasks_get_no_time_and_a_warning(self):
+        replies = self.estimate_replies()
+        replies["task-queues/"] = FetchError("HTTP 503", status=503)
+        del replies["task-queues/proj-wpt%2Fci-gw/pending"]
+        updater = self.updater(FakeFetcher(replies))
+        row = self.row(updater, {})
+        with self.assertLogs("test_update", level="WARNING") as logged:
+            updater.add_estimates([row])
+        self.assertIn("Could not read the Taskcluster queue proj-wpt/ci-gw: HTTP 503", "\n".join(logged.output))
+        self.assertEqual((row["cells"]["gtk"]["nightly"]["estimate"]["unknown"], row["suite_estimate"]["unknown"]), ("queue", "queue"))
+
+    def test_a_view_of_the_queue_too_recent_to_measure_the_pace_from_is_kept_for_the_next_run_with_its_pace(self):
+        recent = {"at": "2026-09-29T11:55:00Z", "tasks": ["a/0", "gtk/0"], "tasks_per_hour": 2}
+        cache = {"version": update_dashboard.CACHE_VERSION, "queue_view": dict(recent)}
+        updater = self.updater(FakeFetcher(self.estimate_replies()), cache)
+        row = self.row(updater, {})
+        updater.add_estimates([row])
+        self.assertEqual(row["cells"]["gtk"]["nightly"]["estimate"]["expected_finish"], "2026-09-29T12:50:00Z")
+        self.assertEqual(cache["queue_view"], recent)
+        # The first view of all has no pace to keep.
+        cache["queue_view"] = {"at": "2026-09-29T11:55:00Z", "tasks": ["a/0", "gtk/0"], "tasks_per_hour": None}
+        row = self.row(updater, {})
+        updater.add_estimates([row])
+        self.assertEqual(row["cells"]["gtk"]["nightly"]["estimate"]["unknown"], "pace")
 
     def test_a_shared_commit_uses_one_github_lookup_per_run(self):
         cache = {"version": update_dashboard.CACHE_VERSION}
