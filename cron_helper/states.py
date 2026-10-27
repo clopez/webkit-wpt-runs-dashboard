@@ -236,20 +236,21 @@ def chunk_history(dated_commits, now):
 
 
 def expected_seconds(durations, elapsed=None):
-    """How long a task should take in all, from how long the finished tasks
-    of its kind took. A task that has already run for a while can only be
-    one of the longer ones: the tasks of a kind that finish first are the
-    short ones, so the median of all of them would say that it is done when
-    it is not. Longer than any of them, it should end any moment now."""
+    """How long a task, or an upload, should take in all, from how long the
+    finished ones of its kind took. One that has already taken a while can
+    only be one of the longer ones: the ones that finish first are the short
+    ones, so the median of all of them would say that it is done when it is
+    not. Longer than any of them, there is nothing to tell how much longer it
+    takes, so None, rather than saying it is done."""
     if elapsed is None:
         return median(durations)
-    longer = [seconds for seconds in durations if seconds > elapsed]
-    return median(longer) if longer else elapsed
+    return median([seconds for seconds in durations if seconds > elapsed])
 
 
 # The pace of the queue is measured between two updates, but not over less
-# than this, which is too short to say, as after an update run by hand.
-QUEUE_PACE_MIN_WINDOW = datetime.timedelta(minutes=10)
+# than this, as after an update run by hand: over 12 minutes on 2026-10-27 it
+# came out at 243 an hour, against 171 over the hour before.
+QUEUE_PACE_MIN_WINDOW = datetime.timedelta(minutes=30)
 
 
 # A queue that ran dry since the previous update only says that the tasks
@@ -286,9 +287,8 @@ MIN_UPLOADS_FOR_ESTIMATE = 5
 
 
 def upload_delay(rows):
-    """How long wpt.fyi takes to create a run after its suite finished: the
-    median over the given rows' uploaded runs, with how many it is from, or
-    (None, count) with too few. A suite that changed after its run was
+    """How long wpt.fyi took to create each run of the given rows after its
+    suite finished, sorted. A suite that changed after its run was
     created, as when a later push added checks to the same commit, or when
     it opened again for a retried task and completed later, has a finish
     time that says nothing about the upload, so it is left out."""
@@ -302,7 +302,7 @@ def upload_delay(rows):
                     delay = (parse_time(created) - parse_time(suite["updated_at"])).total_seconds()
                     if delay >= 0:
                         delays.append(delay)
-    return (round(median(delays)) if len(delays) >= MIN_UPLOADS_FOR_ESTIMATE else None), len(delays)
+    return sorted(delays)
 
 
 def upload_batches(previous, uploads, spread):
@@ -352,6 +352,8 @@ def finish_estimate(tasks, queue, durations_for, now):
         if task["state"] == "running":
             start = parse_time(task["started"]) or now
             seconds = expected_seconds(durations, max(0, (now - start).total_seconds())) if durations else None
+            if durations and seconds is None:
+                unknown.append("longer")
         elif queue is None or task["queue"] != queue["id"]:
             unknown.append("queue")
             continue
@@ -370,7 +372,7 @@ def finish_estimate(tasks, queue, durations_for, now):
             seconds = expected_seconds(durations) if durations else None
         if seconds is not None:
             finishes.append(max(start + datetime.timedelta(seconds=seconds), now))
-    for reason in ("queue", "stuck", "pace", "durations"):
+    for reason in ("queue", "stuck", "pace", "durations", "longer"):
         if reason in unknown:
             estimate["unknown"] = reason
             break
@@ -379,13 +381,33 @@ def finish_estimate(tasks, queue, durations_for, now):
     return estimate
 
 
+# What a processed upload ends as: on wpt.fyi (VALID), or already there from
+# another batch of the same suite (DUPLICATE); anything else was rejected.
+ACCEPTED_STAGES = {"VALID", "DUPLICATE"}
+
+
+def rejected_uploads(status_entries, chunks):
+    """The uploads that wpt.fyi rejected for this run, after its last chunk
+    finished. wpt.fyi's entries only name the browser, not the channel, so on
+    a commit with several channels the run is told apart by the version its
+    chunks tested: a rejected entry has an empty version, but its error lists
+    the versions in conflict, which on 2026-10 were always our chunks' one
+    and the next bundle's. Without a version, nothing can be told apart."""
+    version, finished = chunks.get("version"), parse_time(chunks.get("last_resolved"))
+    if not version or not finished:
+        return []
+    return [entry for entry in status_entries
+            if entry.get("stage") not in ACCEPTED_STAGES and parse_time(entry["created"]) >= finished
+            and (entry.get("browser_version") == version or version in (entry.get("error") or ""))]
+
+
 def upload_reason(suite, settings, status_entries, since):
     # The limit of when wpt.fyi tried to import the run.
     limit = settings.check_run_limit_at(parse_time(since))
     if suite is not None and suite["check_runs"] > limit:
         return {"kind": "check_run_limit", "check_runs": suite["check_runs"], "limit": limit}
     # An upload that wpt.fyi accepted is no reason for the run to be missing.
-    rejected = [entry for entry in status_entries if entry.get("stage") != "VALID"]
+    rejected = [entry for entry in status_entries if entry.get("stage") not in ACCEPTED_STAGES]
     if rejected:
         return {"kind": "wptfyi_status", "entries": rejected}
     return {"kind": "unknown"}
@@ -429,6 +451,11 @@ def decide_state(chunks, suite, uploaded, now, settings, *, status_entries=(), d
         if last_resolved and now - last_resolved > datetime.timedelta(hours=settings.suite_timeout_hours):
             return {"state": "suite_never_finished", "color": "red", "since": chunks["last_resolved"]}
         return {"state": "waiting_for_suite", "color": "yellow"}
+    # wpt.fyi may still take the run from a later batch of the same suite, but a rejection of it is the likely end, so it shows at once.
+    rejected = rejected_uploads(status_entries, chunks)
+    if rejected:
+        return {"state": "not_uploaded", "color": "red", "since": since, "received": received,
+                "reason": {"kind": "wptfyi_status", "entries": rejected}}
     red_at = parse_time(since) + datetime.timedelta(hours=settings.upload_grace_hours)
     if now < red_at:
         return {"state": "uploading", "color": "yellow", "since": since, "received": received, "red_at": red_at.isoformat()}

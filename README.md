@@ -70,7 +70,8 @@ It writes `html/data/dashboard.json` for the page, one file per diff in
 `html/data/diffs/`, and its log in `html/data/cron_helper.log.txt`. It also
 keeps a cache in `cron_helper/cache/`, and the log lines older than 30 days in
 `cron_helper/logs/`. None of these are in git. Later runs take about 40
-seconds.
+seconds. Each run also reads the whole Taskcluster queue of WPT, usually 2 to
+5 MB compressed, but up to about 31 MB while a weekly push waits in it.
 
 ### 3. The cron job
 

@@ -520,25 +520,30 @@ class Updater:
         weekly one has no estimate."""
         processed = {True: [], False: []}
         for entry in self.cache["upload_statuses"].values():
-            if entry["stage"] == "VALID" and entry["created"] and entry["updated"]:
+            # Only the creation time is checked where the entries are read, and a bad time here would stop the whole update.
+            if entry["stage"] == "VALID" and entry["created"] and sources.is_time(entry["updated"]):
                 seconds = (states.parse_time(entry["updated"]) - states.parse_time(entry["created"])).total_seconds()
                 processed[self.has_weekly_tag(entry["full_revision_hash"])].append(seconds)
-        after_suite, after_suite_count = states.upload_delay([row for row in rows if not self.has_weekly_tag(row["sha"])])
+        after_suite = states.upload_delay([row for row in rows if not self.has_weekly_tag(row["sha"])])
         for row in rows:
             weekly = self.has_weekly_tag(row["sha"])
             if len(processed[weekly]) >= states.MIN_UPLOADS_FOR_ESTIMATE:
-                delay, uploads, measured = round(states.median(processed[weekly])), len(processed[weekly]), "received"
-            elif not weekly and after_suite is not None:
-                delay, uploads, measured = after_suite, after_suite_count, "suite"
+                delays, measured = sorted(processed[weekly]), "received"
+            elif not weekly and len(after_suite) >= states.MIN_UPLOADS_FOR_ESTIMATE:
+                delays, measured = after_suite, "suite"
             else:
-                delay, uploads, measured = None, len(processed[weekly]), None
+                delays, measured = None, None
             for channels in row["cells"].values():
                 for cell in channels.values():
                     if cell["state"] != "uploading":
                         continue
-                    cell["estimate"] = {"expected_finish": iso(states.parse_time(cell["since"]) + datetime.timedelta(seconds=delay)) if delay is not None else None,
-                                        "upload_seconds": delay, "uploads": uploads, "measured": measured, "weekly": weekly,
-                                        "unknown": None if delay is not None else "weekly_uploads" if weekly else "uploads"}
+                    since = states.parse_time(cell["since"])
+                    # Like a running task, an upload that has already waited a while can only be one of the slower ones.
+                    delay = states.expected_seconds(delays, (self.now - since).total_seconds()) if delays else None
+                    unknown = None if delay is not None else "longer" if delays else "weekly_uploads" if weekly else "uploads"
+                    cell["estimate"] = {"expected_finish": iso((since + datetime.timedelta(seconds=delay)).replace(microsecond=0)) if delay is not None else None,
+                                        "upload_seconds": round(delay) if delay is not None else None, "uploads": len(delays or processed[weekly]),
+                                        "measured": measured, "weekly": weekly, "unknown": unknown}
                     batch = self.batch_with(row["sha"], cell["chunks"]) if cell.get("received") else None
                     if batch and batch["uploads"]:
                         cell["estimate"].update({"batch_uploads": batch["uploads"], "batch_processed": batch["processed"]})

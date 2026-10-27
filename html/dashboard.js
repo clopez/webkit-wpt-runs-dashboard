@@ -515,11 +515,12 @@ function outcomeText(cell) {
 }
 
 const UNKNOWN_ESTIMATE_REASONS = {
-  queue: "No estimate: the last update could not read the Taskcluster queue",
+  queue: "No estimate: the last update could not read the Taskcluster queue, or these tasks wait in another queue than the one it reads",
   pace: "No estimate yet: the pace of the Taskcluster queue is measured between two updates, and the update before had no view of the queue to compare with, "
     + "as after the dashboard's cache is filled again, or the queue was empty then and no pace from the last 6 hours is known",
   stuck: "No estimate: the Taskcluster queue has not moved since the update before, so its machines may be stuck",
   durations: "No estimate: no finished task says how long these take",
+  longer: "No estimate: this is already taking longer than any of the earlier ones it could be compared with, so nothing tells how much longer it will take",
   uploads: "No estimate: too few runs of the last weeks say how long wpt.fyi takes to create a run",
   weekly_uploads: "No estimate yet: wpt.fyi takes longer with a commit that has a weekly tag, which sends it the stable and beta runs of every browser too, "
     + "and too few of those runs have been processed since the dashboard started keeping how long they took",
@@ -596,10 +597,11 @@ function uploadEstimateTitle(estimate) {
       + "so our run can be ready well before that, or somewhat after";
   const median = formatSeconds(estimate.upload_seconds);
   if (estimate.measured === "suite")
-    return `An estimate from the last update: wpt.fyi created the ${estimate.uploads} runs of daily commits of the last ${dashboard.settings.max_age_days} days a median of ${median} after their suite finished`;
-  return `An estimate from the last update: wpt.fyi took a median of ${median} to process our last ${estimate.uploads} runs of `
-    + (estimate.weekly ? "commits with a weekly tag, which send it the stable and beta runs of every browser too" : "daily commits")
-    + ", from receiving them to having them ready";
+    return `An estimate from the last update: among the ${estimate.uploads} runs of daily commits of the last ${dashboard.settings.max_age_days} days, `
+      + `those that took longer than this one had waited were on wpt.fyi a median of ${median} after their suite finished`;
+  return `An estimate from the last update: wpt.fyi took a median of ${median} to process those of our last ${estimate.uploads} runs of `
+    + (estimate.weekly ? "commits with a weekly tag, which send it the stable and beta runs of every browser too," : "daily commits")
+    + " that took longer than this one had waited, from receiving them to having them ready";
 }
 
 function stateCell(portKey, cell, row, channelLabel) {

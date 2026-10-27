@@ -183,6 +183,24 @@ class DecideStateTest(unittest.TestCase):
         # An upload known only from the rejected ones says when a batch came, not how big it was.
         self.assertEqual(states.upload_batches([], [("2026-10-01T13:21:36Z", None)], spread), [{"at": "2026-10-01T13:21:36Z", "uploads": None, "processed": None}])
 
+    def test_a_run_that_wptfyi_rejected_is_not_uploaded_at_once_but_only_for_its_own_channel(self):
+        # As on 2026-10-14: the chunks of the run tested two bundles, and wpt.fyi said so with an empty version.
+        conflict = {"stage": "INVALID", "browser_version": "", "created": "2026-09-29T09:00:00Z",
+                    "error": "Conflicting 'browser_version: [2.55.0 (323696@main), 2.55.0 (323533@main)]' found in the metadata"}
+        nightly = chunks_summary(version="2.55.0 (323533@main)")
+        cell = self.decide(nightly, suite(), entries=[conflict], received_at="2026-09-29T08:30:00Z")
+        self.assertEqual((cell["state"], cell["reason"]), ("not_uploaded", {"kind": "wptfyi_status", "entries": [conflict]}))
+        # The stable run of the same browser on the same commit is not that one, so it waits as usual.
+        stable = chunks_summary(version="2.54.1")
+        self.assertEqual(self.decide(stable, suite(), entries=[conflict], received_at="2026-09-29T08:30:00Z")["state"], "uploading")
+        # Neither is a run whose version is not known, nor one whose chunks finished after the rejection.
+        self.assertEqual(self.decide(chunks_summary(), suite(), entries=[conflict], received_at="2026-09-29T08:30:00Z")["state"], "uploading")
+        later = chunks_summary(version="2.55.0 (323533@main)", last_resolved="2026-09-29T10:00:00Z")
+        self.assertEqual(self.decide(later, suite(updated_at="2026-09-29T10:30:00Z"), entries=[conflict])["state"], "uploading")
+        # A duplicate means the run is already on wpt.fyi from another batch, so it is no rejection.
+        self.assertEqual(self.decide(nightly, suite(), entries=[{**conflict, "stage": "DUPLICATE"}], received_at="2026-09-29T08:30:00Z")["state"],
+                         "uploading")
+
     def test_a_run_that_wptfyi_received_is_uploading_whatever_the_suite_says(self):
         cell = self.decide(chunks_summary(), suite(status="in_progress", updated_at="2026-09-29T11:40:00Z"), received_at="2026-09-29T11:17:03Z")
         self.assertEqual((cell["state"], cell["since"], cell["received"]), ("uploading", "2026-09-29T11:17:03Z", True))
@@ -215,9 +233,6 @@ class DecideStateTest(unittest.TestCase):
         self.assertEqual(with_status["reason"], {"kind": "wptfyi_status", "entries": entries})
         self.assertEqual(self.decide(chunks_summary(), suite(updated_at="2026-09-28T12:00:00Z"))["reason"], {"kind": "unknown"})
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 def brief(name, state, started=None, resolved=None, group="groupA", queue="proj-wpt/ci-gw", task_id=None, run_id=0, chunk_of=None):
@@ -306,9 +321,10 @@ class EstimateTest(unittest.TestCase):
         self.assertEqual(estimate, {"running": 1, "pending": 2, "unscheduled": 0, "position": 30, "queue_length": 100, "tasks_per_hour": 60,
                                     "expected_finish": "2026-09-29T13:00:00Z", "unknown": None})
 
-    def test_a_running_task_past_its_usual_time_should_finish_any_moment_now(self):
+    def test_a_running_task_longer_than_any_of_its_kind_has_no_estimate_rather_than_one_that_says_it_is_done(self):
         tasks = [brief("wpt-firefox-beta-reftest-1", "running", "2026-09-29T10:00:00Z")]
-        self.assertEqual(states.finish_estimate(tasks, None, lambda task: [30 * 60], NOW)["expected_finish"], "2026-09-29T12:00:00Z")
+        estimate = states.finish_estimate(tasks, None, lambda task: [30 * 60], NOW)
+        self.assertEqual((estimate["expected_finish"], estimate["unknown"]), (None, "longer"))
 
     def test_a_task_that_has_run_for_a_while_takes_as_long_as_the_finished_ones_that_took_longer(self):
         # The Android chunks of 2026-10-26: the first to finish took 20 to 48 minutes, so their median said done while some ran on for 70.
@@ -317,6 +333,7 @@ class EstimateTest(unittest.TestCase):
         self.assertEqual(states.finish_estimate(tasks, None, lambda task: finished, NOW)["expected_finish"], "2026-09-29T12:30:00Z")
         self.assertEqual(states.expected_seconds(finished), 48 * 60)
         self.assertEqual(states.expected_seconds(finished, 70 * 60), 100 * 60)
+        self.assertIsNone(states.expected_seconds(finished, 120 * 60))
 
     def test_a_waiting_task_no_longer_in_the_queue_has_started_and_one_waiting_for_another_task_joins_the_end(self):
         started = states.finish_estimate([brief("wpt-firefox-beta-reftest-1", "pending")], self.queue({}), lambda task: [60 * 60], NOW)
@@ -338,5 +355,8 @@ class EstimateTest(unittest.TestCase):
             return {"suite": suite(updated_at=suite_finished), "cells": {"gtk": {"nightly": {"state": state, "wptfyi": {"created_at": created}}}}}
         rows = [row("2026-09-29T08:00:00Z", f"2026-09-29T08:{minutes}:00Z") for minutes in (10, 20, 30, 40, 50)]
         rows.append(row("2026-09-30T08:00:00Z", "2026-09-29T08:10:00Z"))
-        self.assertEqual(states.upload_delay(rows), (30 * 60, 5))
-        self.assertEqual(states.upload_delay(rows[:4]), (None, 4))
+        self.assertEqual(states.upload_delay(rows), [minutes * 60 for minutes in (10, 20, 30, 40, 50)])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -471,9 +471,11 @@ cd cron_helper && python3 -m unittest discover -s tests
      the current first one in the previous run's list, which the cache keeps
      as `taskId/runId`, with the time it was read, which after filling the
      cache again can be many minutes after the run started. A list less than
-     10 minutes old, as after an update run by hand, is too recent to measure
-     from, so that run uses the pace measured with it, and keeps it for the
-     next run. The queue is read on every run, even with nothing of ours
+     30 minutes old, as after an update run by hand, is too recent to measure
+     from, because over a short time the pace jumps (over 12 minutes on
+     2026-10-27 it came out at 243 an hour, against 171 over the hour
+     before), so that run uses the pace measured with it, and keeps it for
+     the next run. The queue is read on every run, even with nothing of ours
      waiting, so that the pace is known as soon as something is.
    - When the first task now was not in the previous list, the queue ran dry
      in between, and the count only says that at least the tasks waiting
@@ -527,8 +529,10 @@ cd cron_helper && python3 -m unittest discover -s tests
      gone simply stops being looked up, until its runs leave the window.
    - A running task that has already run for a while can only be one of the
      longer ones, so it takes as long as the finished tasks of its kind that
-     took longer than it has run so far (their median), and if none did, it
-     should end any moment now. The median of all of them would be wrong for
+     took longer than it has run so far (their median), and if none did,
+     there is no estimate, because nothing tells how much longer it takes,
+     and "should be done by now" would be false. The median of all of them
+     would be wrong for
      the tasks that are left, because the ones that finish first are the
      short ones: on 2026-10-26, Firefox Android chunks that had run for 81
      minutes were taken as done by the median of 48, while the ones that
@@ -540,8 +544,11 @@ cd cron_helper && python3 -m unittest discover -s tests
      them. For example
      `{"running": 24, "pending": 63, "unscheduled": 0, "position": 158, "queue_length": 255, "tasks_per_hour": 120, "expected_finish": "2026-10-27T00:10:00Z", "unknown": null}`.
      Without the queue, its pace or a duration there is no time, and
-     `unknown` says which was missing (`queue`, `pace` or `durations`). The
-     pace changes with what runs, so the page says "around".
+     `unknown` says why: `queue` (it could not be read, or the task waits in
+     another queue), `pace`, `stuck` (the queue did not move), `durations`,
+     or `longer` (already longer than any earlier one); for an upload,
+     `uploads` or `weekly_uploads` (too few times measured). The pace
+     changes with what runs, so the page says "around".
    - A decision task waits in the same queue as the tasks it creates: over
      45 of them on 2026-10-26, it waited a median of 71 minutes for a machine
      (90% within 8 hours, and up to almost 15), and then ran for 2 (at most
@@ -586,7 +593,11 @@ cd cron_helper && python3 -m unittest discover -s tests
      appeared instead (the median; on 2026-10-26, 23 minutes over 66 daily
      runs), which is reliable because its suite rarely opens again, while a
      weekly commit has no estimate, rather than a daily one known to be too
-     short. An uploading cell gets, for example,
+     short. Like a running task, an upload that has already waited a while
+     can only be one of the slower ones, so only the times longer than its
+     wait count; otherwise, once the median had passed, half of the uploads
+     would say "should be done by now" for hours. An uploading cell gets,
+     for example,
      `"estimate": {"expected_finish": "2026-10-27T01:44:00Z", "upload_seconds": 1620, "uploads": 6, "measured": "received", "weekly": true, "unknown": null}`.
    - The page shows how long is left in the headline of each cell with an
      estimate, and the time in its details. Once that time has passed, it
@@ -614,6 +625,7 @@ a run that is on wpt.fyi is green whatever else happened:
 | our chunks passed, the suite is not finished | yellow: waiting for the suite to finish, how many tasks of the commit are left, and when the suite should finish |
 | our chunks passed, the suite is still not finished 48 hours later | red: suite never finished |
 | wpt.fyi received a batch of the commit's runs after our last chunk finished, or the suite finished, and the run is not on wpt.fyi, within the grace period | yellow: uploading, and when the run should be on wpt.fyi |
+| wpt.fyi already rejected this run, after its last chunk finished | red: not uploaded, with wpt.fyi's error, without waiting for the grace period |
 | grace period over, not in a list of wpt.fyi runs that could not be refreshed | yellow: wpt.fyi not checked |
 | grace period over, still not on wpt.fyi | red: not uploaded, with a reason if one can be found (see below) |
 
@@ -657,6 +669,20 @@ wpt.fyi before the cell turns red, so a slow upload is never reported as a
 failure. In the cases measured, the run appeared on wpt.fyi 26 to 70 minutes
 after the suite finished. So a missing upload shows as red between 7 and 8
 hours after the suite finished.
+
+A run that wpt.fyi has already rejected does not wait for the grace period:
+its cell turns red as soon as `/api/status` has the rejection, with wpt.fyi's
+error. That is mostly the bundle race (see the nightly bundle notes): in
+October 2026 wpt.fyi rejected 5 commits' runs with "Conflicting
+'browser_version'", each of them again with every batch, five times for the
+commit of 10-03. The entries name the browser but not the channel, so on a
+commit with a weekly tag the stable, beta and nightly runs of a port share
+them. A rejection is matched to a run by the version its chunks tested: the
+entry's own version is empty in those rejections, but its error lists the
+versions in conflict, and the run's version was always one of them. A run
+whose version is not known, or that finished after the rejection, waits for
+the grace period as before; a later batch could still bring the run, and
+then it turns green.
 
 When a run is not uploaded, the cell tries to explain why:
 
@@ -1184,6 +1210,17 @@ Most of the data never changes once a run is over, so the script keeps it in
   with its detail file in `html/data/diffs/`;
 - **wpt.fyi upload statuses**: our entries of `/api/status` and
   `/api/status/invalid`, kept after wpt.fyi drops them from its lists;
+- **wpt.fyi upload batches**: for each commit in the window, when wpt.fyi
+  received each batch of its runs, how many uploads it had and how many were
+  processed, because pending uploads have no browser name and `/api/status`
+  only covers about a day;
+- **the progress of each commit**: its unfinished tasks of every browser,
+  with how long its finished ones took by kind, while it is in progress; the
+  time of each of its finished chunks and decision tasks, for the history of
+  each chunk, for as long as it is in the window;
+- **the last view of the Taskcluster queue**: the order of its waiting tasks,
+  when it was read and the pace measured then, and the last pace measured
+  while it was busy, to measure the pace on the next run;
 - **the last lists of wpt.fyi runs**, used only when wpt.fyi fails to answer;
 - **releases**: the last release and bundle of each port and channel, used
   when webkitgtk.org or wpewebkit.org fails to answer.
@@ -1245,7 +1282,7 @@ The settings are constants at the top of the files:
   uploads count as one batch;
 - `states.py` (`Settings`): `upload_grace_hours` 7, `suite_timeout_hours` 48
   and `check_run_limits` 500, then 2000 from 2026-10-03;
-- `states.py`, for the estimates: `QUEUE_PACE_MIN_WINDOW` 10 minutes,
+- `states.py`, for the estimates: `QUEUE_PACE_MIN_WINDOW` 30 minutes,
   `BUSY_PACE_MAX_AGE` 6 hours, `MIN_FINISHED_OF_KIND` 5,
   `MIN_UPLOADS_FOR_ESTIMATE` 5, `HISTORY_RUNS` 7 and `HISTORY_AGE` 14 days;
 - `fetch.py`: 3 attempts, 10 and 30 seconds between them, 90-second timeout;

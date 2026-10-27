@@ -474,8 +474,9 @@ class UpdaterTest(unittest.TestCase):
         rows = self.upload_rows()
         updater = self.updater(FakeFetcher({"task-queues/": {"tasks": []}}))
         updater.add_estimates(rows)
+        # It has already waited 30 minutes, so only the uploads that took longer, 40 and 50 minutes, say how long it takes.
         self.assertEqual(rows[-1]["cells"]["gtk"]["nightly"]["estimate"],
-                         {"expected_finish": "2026-09-29T12:00:00Z", "upload_seconds": 30 * 60, "uploads": 5, "measured": "suite", "weekly": False, "unknown": None})
+                         {"expected_finish": "2026-09-29T12:20:00Z", "upload_seconds": 50 * 60, "uploads": 5, "measured": "suite", "weekly": False, "unknown": None})
         self.assertNotIn("estimate", rows[0]["cells"]["gtk"]["nightly"])
         # Too few uploads to say how long wpt.fyi takes.
         rows = rows[1:]
@@ -489,9 +490,14 @@ class UpdaterTest(unittest.TestCase):
         updater.tags_by_sha = {"weekly-sha": {"epochs/weekly/2026-09-28_04H"}, "weekly-sha-before": {"epochs/weekly/2026-09-21_04H"}}
         rows = self.upload_rows("weekly-sha")
         updater.add_estimates(rows)
-        # Not the 30 minutes after their suite that daily runs took: weekly runs took a median of 60 to be processed.
+        # Not what daily runs took after their suite: the weekly runs that took longer than the 30 minutes waited so far took a median of 70.
         self.assertEqual(rows[-1]["cells"]["gtk"]["nightly"]["estimate"],
-                         {"expected_finish": "2026-09-29T12:30:00Z", "upload_seconds": 60 * 60, "uploads": 5, "measured": "received", "weekly": True, "unknown": None})
+                         {"expected_finish": "2026-09-29T12:40:00Z", "upload_seconds": 70 * 60, "uploads": 5, "measured": "received", "weekly": True, "unknown": None})
+        # Waiting longer than any of them took, there is nothing to tell how much longer.
+        rows = self.upload_rows("weekly-sha")
+        rows[-1]["cells"]["gtk"]["nightly"]["since"] = "2026-09-29T10:00:00Z"
+        updater.add_estimates(rows)
+        self.assertEqual(rows[-1]["cells"]["gtk"]["nightly"]["estimate"]["unknown"], "longer")
         # Without enough weekly times, no estimate rather than the daily one.
         del cache["upload_statuses"]["80"]
         rows = self.upload_rows("weekly-sha")
